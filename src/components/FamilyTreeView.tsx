@@ -10,6 +10,7 @@ const PERSON_WIDTH = 100;
 const PERSON_HEIGHT = 140;
 const COUPLE_GAP = 80; // Gap between partners (for marriage symbol)
 const SIBLING_GAP = 40;
+const CHILDLESS_SPOUSE_GAP = COUPLE_GAP + SIBLING_GAP;
 const GENERATION_GAP = 190;
 const SYMBOL_SIZE = 36;
 const CONNECTOR_CLEARANCE = 10;
@@ -43,7 +44,7 @@ interface PositionedElement {
 type AncestorSide = 'maternal' | 'paternal';
 
 export const FamilyTreeView = () => {
-  const { familyTree, addPerson, addParent, addSpouse, addChild, deletePerson, toggleMarriageStatus, setCurrentView, allTrees, activeTreeId } = useFamilyTree();
+  const { familyTree, addPerson, addParent, addSpouse, addChild, deletePerson, toggleMarriageStatus, setCurrentView, allTrees, activeTreeId, updatePerson } = useFamilyTree();
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
   const [editingPersonId, setEditingPersonId] = useState<string | null>(null);
   const [linkMenuState, setLinkMenuState] = useState<{ personId: string; type: 'link' | 'unlink' | 'add-child' } | null>(null);
@@ -206,8 +207,26 @@ export const FamilyTreeView = () => {
 
   const handleAddParent = () => {
     if (selectedPersonId) {
-      const fatherId = addPerson({ gender: 'male' });
-      const motherId = addPerson({ gender: 'female' });
+      const child = familyTree.persons[selectedPersonId];
+      if (!child) return;
+
+      // Calculate parent positions based on child's position
+      const childX = child.position?.x ?? 0;
+      const childGen = child.position?.generation ?? FOCUS_GENERATION;
+      const parentGen = childGen - 1;
+
+      // Mother on left, father on right, centered above child
+      const motherX = childX - (PERSON_WIDTH + COUPLE_GAP) / 2;
+      const fatherX = childX + (PERSON_WIDTH + COUPLE_GAP) / 2;
+
+      const fatherId = addPerson({
+        gender: 'male',
+        position: { x: fatherX, generation: parentGen }
+      });
+      const motherId = addPerson({
+        gender: 'female',
+        position: { x: motherX, generation: parentGen }
+      });
       addParent(selectedPersonId, fatherId);
       addParent(selectedPersonId, motherId);
       // Expand the selected person so parents become visible
@@ -218,7 +237,23 @@ export const FamilyTreeView = () => {
 
   const handleAddSpouse = () => {
     if (selectedPersonId) {
-      const spouseId = addPerson({});
+      const person = familyTree.persons[selectedPersonId];
+      if (!person) return;
+
+      // Calculate spouse position based on person's position
+      const personX = person.position?.x ?? 0;
+      const personGen = person.position?.generation ?? FOCUS_GENERATION;
+
+      // Women on left, men on right
+      // If person is male, spouse (female) goes left
+      // If person is female, spouse (male) goes right
+      const spouseX = person.gender === 'male'
+        ? personX - PERSON_WIDTH - COUPLE_GAP  // Female spouse on left
+        : personX + PERSON_WIDTH + COUPLE_GAP; // Male spouse on right
+
+      const spouseId = addPerson({
+        position: { x: spouseX, generation: personGen }
+      });
       addSpouse(selectedPersonId, spouseId);
       // Only expand the selected person - spouse trees should stay collapsed by default
       setExpandedPersons(prev => new Set([...prev, selectedPersonId]));
@@ -229,6 +264,8 @@ export const FamilyTreeView = () => {
   const handleAddChild = () => {
     if (selectedPersonId) {
       const person = familyTree.persons[selectedPersonId];
+      if (!person) return;
+
       const personUnions = person.unionIds
         .map(id => familyTree.unions[id])
         .filter((union): union is Union => Boolean(union));
@@ -236,9 +273,39 @@ export const FamilyTreeView = () => {
       if (personUnions.length > 1) {
         setLinkMenuState({ personId: selectedPersonId, type: 'add-child' });
       } else {
-        const childId = addPerson({});
-        const unionId = personUnions[0]?.id;
-        addChild(selectedPersonId, childId, unionId);
+        // Calculate child position based on parent's position
+        const personX = person.position?.x ?? 0;
+        const personGen = person.position?.generation ?? FOCUS_GENERATION;
+        const childGen = personGen + 1;
+
+        // If there's a union with a partner, center the child between parents
+        let childX = personX;
+        const union = personUnions[0];
+        if (union) {
+          const partnerId = union.partnerIds.find(id => id !== selectedPersonId);
+          if (partnerId) {
+            const partner = familyTree.persons[partnerId];
+            if (partner?.position) {
+              childX = (personX + partner.position.x) / 2;
+            }
+          }
+
+          // If there are existing children, position new child to the right
+          if (union.childIds.length > 0) {
+            const existingChildrenX = union.childIds
+              .map(id => familyTree.persons[id]?.position?.x)
+              .filter((x): x is number => x !== undefined);
+            if (existingChildrenX.length > 0) {
+              const maxChildX = Math.max(...existingChildrenX);
+              childX = maxChildX + PERSON_WIDTH + SIBLING_GAP;
+            }
+          }
+        }
+
+        const childId = addPerson({
+          position: { x: childX, generation: childGen }
+        });
+        addChild(selectedPersonId, childId, union?.id);
         // Expand both the selected person and the new child
         setExpandedPersons(prev => new Set([...prev, selectedPersonId, childId]));
       }
@@ -293,6 +360,16 @@ export const FamilyTreeView = () => {
   const handleZoomOut = useCallback(() => {
     setScale(prev => Math.max(0.2, prev / 1.2));
   }, []);
+
+  // Reset all saved positions to recalculate layout
+  const handleResetPositions = useCallback(() => {
+    if (!familyTree) return;
+
+    // Clear all saved positions
+    Object.keys(familyTree.persons).forEach(personId => {
+      updatePerson(personId, { position: undefined });
+    });
+  }, [familyTree, updatePerson]);
 
   // Panning handlers for the canvas
   const handleCanvasPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -360,16 +437,17 @@ export const FamilyTreeView = () => {
   }, [ancestorSideOverrides]);
 
   // Build the visible tree structure based on expanded state
-  const { visibleElements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons } = useMemo(() => {
+  const { visibleElements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons, enforcedPositions } = useMemo(() => {
     const elements: PositionedElement[] = [];
     const positionedPersons = new Map<string, { x: number; y: number; generation: number }>();
     const positionedUnions = new Map<string, { x: number; y: number; generation: number }>();
     const collapsedDownUnions = new Set<string>();
     const collapsedUpPersons = new Set<string>();
     const collapsedSidePersons = new Set<string>();
+    const enforcedPositions = new Set<string>();
 
     if (!focusedPersonId || !familyTree.persons[focusedPersonId]) {
-      return { visibleElements: elements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons };
+      return { visibleElements: elements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons, enforcedPositions };
     }
 
     // STEP 1: Collect connected persons with auto-minimized branches
@@ -379,12 +457,14 @@ export const FamilyTreeView = () => {
     const collectVisibleConnected = (startPersonId: string, startGen: number) => {
       // isDirectLine: true for focused person and their direct descendants
       // isAncestor: true for ancestors (parents, grandparents) - their children are siblings, not direct line
-      const queue: { id: string; gen: number; isDirectLine: boolean; isAncestor: boolean }[] = [
-        { id: startPersonId, gen: startGen, isDirectLine: true, isAncestor: false }
+      // isSibling: true for siblings (children of ancestors who are not direct line) - they can show their spouses
+      // isSpouseOfSibling: true for spouses of siblings - they should NOT show their own family tree
+      const queue: { id: string; gen: number; isDirectLine: boolean; isAncestor: boolean; isSibling: boolean; isSpouseOfSibling: boolean }[] = [
+        { id: startPersonId, gen: startGen, isDirectLine: true, isAncestor: false, isSibling: false, isSpouseOfSibling: false }
       ];
 
       while (queue.length > 0) {
-        const { id, gen, isDirectLine, isAncestor } = queue.shift()!;
+        const { id, gen, isDirectLine, isAncestor, isSibling, isSpouseOfSibling } = queue.shift()!;
 
         const processedEntry = processedPersons.get(id);
         if (processedEntry && (!isDirectLine || processedEntry.isDirectLine)) {
@@ -401,25 +481,25 @@ export const FamilyTreeView = () => {
         }
 
         const isExpanded = expandedPersons.has(id);
-        // Only expand branches for direct line persons (focused + descendants) or explicitly expanded
-        // Ancestors can expand to show their partners (other parent) but their children (siblings) won't be direct line
-        const canExpandBranches = isDirectLine || isAncestor || isExpanded;
+        // Only expand branches for direct line persons (focused + descendants), ancestors, siblings, or explicitly expanded
+        const canExpandBranches = isDirectLine || isAncestor || isSibling || isExpanded;
 
-        // Only show spouses for direct line persons and ancestors
-        // Spouses should NOT show their other spouses (spouse's spouse should be hidden)
-        const canShowSpouses = isDirectLine || isAncestor;
+        // Show spouses for direct line persons, ancestors, and siblings
+        // But NOT for spouses of siblings (their family tree stays hidden)
+        const canShowSpouses = (isDirectLine || isAncestor || isSibling) && !isSpouseOfSibling;
 
         if (canExpandBranches) {
           person.unionIds.forEach(unionId => {
             const union = familyTree.unions[unionId];
             if (!union) return;
 
-            // Only add spouses for direct line persons and ancestors
-            // This prevents showing spouse's other spouses
+            // Add spouses if allowed
             if (canShowSpouses) {
               union.partnerIds.forEach(partnerId => {
                 if (partnerId !== id && familyTree.persons[partnerId]) {
-                  queue.push({ id: partnerId, gen, isDirectLine: false, isAncestor: false });
+                  // Spouses of siblings are marked so they don't show their own family tree
+                  const partnerIsSpouseOfSibling = isSibling;
+                  queue.push({ id: partnerId, gen, isDirectLine: false, isAncestor: false, isSibling: false, isSpouseOfSibling: partnerIsSpouseOfSibling });
                 }
               });
             }
@@ -431,12 +511,22 @@ export const FamilyTreeView = () => {
             const allowChildren = childDepth <= AUTO_MINIMIZE_DEPTH || isExpanded;
 
             if (allowChildren) {
-              // Children of ancestors are siblings - they are NOT direct line
+              // Children of ancestors are siblings - they are NOT direct line but can show their spouses
               // Children of direct line persons (focused person or their descendants) ARE direct line
               const childrenAreDirectLine = isDirectLine && !isAncestor;
+              const childrenAreSiblings = isAncestor && !childrenAreDirectLine;
               union.childIds.forEach(childId => {
                 if (familyTree.persons[childId]) {
-                  queue.push({ id: childId, gen: childGen, isDirectLine: childrenAreDirectLine, isAncestor: false });
+                  // Check if this child is the focused person (direct line to them)
+                  const isChildOnDirectLine = childrenAreDirectLine || childId === startPersonId;
+                  queue.push({
+                    id: childId,
+                    gen: childGen,
+                    isDirectLine: isChildOnDirectLine,
+                    isAncestor: false,
+                    isSibling: childrenAreSiblings && !isChildOnDirectLine,
+                    isSpouseOfSibling: false
+                  });
                 }
               });
             } else {
@@ -481,7 +571,7 @@ export const FamilyTreeView = () => {
               // Parents are ancestors - their children (siblings) won't be direct line
               selectedParents.forEach(parentId => {
                 if (familyTree.persons[parentId]) {
-                  queue.push({ id: parentId, gen: parentGen, isDirectLine: true, isAncestor: true });
+                  queue.push({ id: parentId, gen: parentGen, isDirectLine: true, isAncestor: true, isSibling: false, isSpouseOfSibling: false });
                 }
               });
             }
@@ -535,10 +625,12 @@ export const FamilyTreeView = () => {
     // STEP 2: Group by generation
     const generationGroups = new Map<number, string[]>();
     personGenerations.forEach((gen, personId) => {
-      if (!generationGroups.has(gen)) {
-        generationGroups.set(gen, []);
+      const person = familyTree.persons[personId];
+      const resolvedGen = person?.position?.generation ?? gen;
+      if (!generationGroups.has(resolvedGen)) {
+        generationGroups.set(resolvedGen, []);
       }
-      generationGroups.get(gen)!.push(personId);
+      generationGroups.get(resolvedGen)!.push(personId);
     });
 
     // STEP 3: Position each generation - children centered under their parents
@@ -547,7 +639,17 @@ export const FamilyTreeView = () => {
 
     sortedGens.forEach(generation => {
       const personsInGen = generationGroups.get(generation) || [];
+      const personsInGenSet = new Set(personsInGen);
       const y = generation * GENERATION_GAP;
+      const childClusters: Array<{
+        unionId: string;
+        parentCenterX: number;
+        unionOrder: number;
+        memberIds: Set<string>;
+        minX: number;
+        maxX: number;
+      }> = [];
+      const UNION_CLUSTER_GAP = Math.max(SIBLING_GAP * 2, COUPLE_GAP);
 
       // Separate persons into those with positioned parents and those without
       const childrenWithParents: Map<string, string[]> = new Map(); // unionId -> children
@@ -557,122 +659,235 @@ export const FamilyTreeView = () => {
         const person = familyTree.persons[personId];
         if (!person) return;
 
-        if (person.parentUnionId && positionedUnions.has(person.parentUnionId)) {
-          // This person's parent union is already positioned
-          const children = childrenWithParents.get(person.parentUnionId) || [];
-          children.push(personId);
-          childrenWithParents.set(person.parentUnionId, children);
-        } else {
-          personsWithoutParents.push(personId);
+        if (person.parentUnionId) {
+          const parentUnion = familyTree.unions[person.parentUnionId];
+          const hasVisibleParent = parentUnion?.partnerIds.some(parentId => personGenerations.has(parentId));
+
+          if (parentUnion && hasVisibleParent) {
+            const children = childrenWithParents.get(person.parentUnionId) || [];
+            children.push(personId);
+            childrenWithParents.set(person.parentUnionId, children);
+            return;
+          }
         }
+
+        personsWithoutParents.push(personId);
       });
 
-      // Position children centered under their parent union
+      // Position children centered under their parent union (include spouses as a family unit)
       childrenWithParents.forEach((children, parentUnionId) => {
-        const parentUnionPos = positionedUnions.get(parentUnionId);
-        if (!parentUnionPos) return;
-
         const parentUnion = familyTree.unions[parentUnionId];
         if (!parentUnion) return;
 
-        // Sort children: first by unions (partners together), then by childIds order
-        // Check for unions between children to group partners
-        const childUnions = new Map<string, string>(); // childId -> unionId with another child
-        children.forEach(childId => {
-          const child = familyTree.persons[childId];
-          if (!child) return;
-          child.unionIds.forEach(uid => {
-            const u = familyTree.unions[uid];
-            if (u) {
-              u.partnerIds.forEach(partnerId => {
-                if (partnerId !== childId && children.includes(partnerId)) {
-                  childUnions.set(childId, uid);
-                }
-              });
-            }
-          });
-        });
-
-        // Sort children: keep partners together, males left, females right
-        children.sort((a, b) => {
-          const personA = familyTree.persons[a];
-          const personB = familyTree.persons[b];
-
-          // Check if they're partners
-          const sharedUnion = personA?.unionIds.find(uid => {
-            const u = familyTree.unions[uid];
-            return u && u.partnerIds.includes(b);
-          });
-
-          if (sharedUnion) {
-            // They're partners - male first
-            if (personA?.gender === 'female' && personB?.gender !== 'female') return 1;
-            if (personB?.gender === 'female' && personA?.gender !== 'female') return -1;
-          }
-
-          // Default: by childIds order
-          const indexA = parentUnion.childIds.indexOf(a);
-          const indexB = parentUnion.childIds.indexOf(b);
-          return indexA - indexB;
-        });
-
-        // Get parent positions to determine the spread
         const parentPositions = parentUnion.partnerIds
-          .map(pid => positionedPersons.get(pid))
+          .map(pid => {
+            const parent = familyTree.persons[pid];
+            if (!parent) return null;
+            if (parent.position) {
+              return {
+                x: parent.position.x,
+                y: parent.position.generation * GENERATION_GAP,
+                generation: parent.position.generation
+              };
+            }
+            return positionedPersons.get(pid) ?? null;
+          })
           .filter(Boolean) as { x: number; y: number; generation: number }[];
 
-        let parentCenterX = parentUnionPos.x;
-        let parentWidth = PERSON_WIDTH + COUPLE_GAP;
+        if (parentPositions.length === 0) {
+          children.forEach(childId => {
+            if (!personsWithoutParents.includes(childId)) {
+              personsWithoutParents.push(childId);
+            }
+          });
+          return;
+        }
 
+        let parentCenterX = parentPositions[0].x;
         if (parentPositions.length >= 2) {
           const minX = Math.min(...parentPositions.map(p => p.x));
           const maxX = Math.max(...parentPositions.map(p => p.x));
           parentCenterX = (minX + maxX) / 2;
-          parentWidth = maxX - minX;
-        } else if (parentPositions.length === 1) {
-          parentCenterX = parentPositions[0].x;
         }
 
-        // Calculate children positions - account for COUPLE_GAP between partners
-        const numChildren = children.length;
+        const childrenSet = new Set(children);
+        const orderedChildren = parentUnion.childIds.filter(childId => childrenSet.has(childId));
+        const clusterMembers = new Set<string>();
+        const savedOrder = orderedChildren
+          .map(childId => {
+            const childX = familyTree.persons[childId]?.position?.x;
+            return typeof childX === 'number' ? { id: childId, x: childX } : null;
+          })
+          .filter((entry): entry is { id: string; x: number } => Boolean(entry));
+        let forceOrder = false;
+        if (savedOrder.length >= 2) {
+          const sortedByX = [...savedOrder].sort((a, b) => a.x - b.x).map(entry => entry.id);
+          const byChildOrder = savedOrder.map(entry => entry.id);
+          forceOrder = sortedByX.some((id, index) => id !== byChildOrder[index]);
+        }
+        const assignedInGen = new Set<string>();
 
-        // Calculate total width needed, using COUPLE_GAP for partners
-        let childrenWidth = 0;
-        for (let i = 0; i < numChildren; i += 1) {
-          childrenWidth += PERSON_WIDTH;
-          if (i < numChildren - 1) {
-            const currentChild = familyTree.persons[children[i]];
-            const arePartners = currentChild?.unionIds.some(uid => {
-              const u = familyTree.unions[uid];
-              return u && u.partnerIds.includes(children[i + 1]);
+        type ChildUnit = { childId: string; members: string[]; gaps: number[]; partners: string[]; width: number; childOffset: number };
+        const childUnits: ChildUnit[] = [];
+
+        orderedChildren.forEach(childId => {
+          if (assignedInGen.has(childId)) return;
+
+          const child = familyTree.persons[childId];
+          if (!child) return;
+
+          assignedInGen.add(childId);
+
+          const partnerMeta = new Map<string, { hasChildren: boolean; order: number; side: 'left' | 'right' }>();
+
+          child.unionIds.forEach((unionId, unionIndex) => {
+            const union = familyTree.unions[unionId];
+            if (!union) return;
+
+            union.partnerIds.forEach(partnerId => {
+              if (partnerId === childId) return;
+              if (!personsInGenSet.has(partnerId)) return;
+              if (assignedInGen.has(partnerId)) return;
+
+              const partner = familyTree.persons[partnerId];
+              if (!partner) return;
+
+              const partnerHasVisibleParents = Boolean(
+                partner.parentUnionId &&
+                familyTree.unions[partner.parentUnionId]?.partnerIds.some(parentId => personGenerations.has(parentId))
+              );
+              if (partnerHasVisibleParents) return;
+
+              const hasChildren = union.childIds.length > 0;
+              const side = partner.gender === 'female' ? 'left' : 'right';
+              const existing = partnerMeta.get(partnerId);
+
+              if (!existing || unionIndex < existing.order) {
+                partnerMeta.set(partnerId, { hasChildren, order: unionIndex, side });
+              } else if (hasChildren && !existing.hasChildren) {
+                partnerMeta.set(partnerId, { ...existing, hasChildren });
+              }
             });
-            childrenWidth += arePartners ? COUPLE_GAP : CHILDREN_GAP;
+          });
+
+          const partners = Array.from(partnerMeta.keys());
+          partners.forEach(partnerId => assignedInGen.add(partnerId));
+
+          const leftPartners = partners
+            .map(id => ({ id, ...partnerMeta.get(id)! }))
+            .filter(partner => partner.side === 'left')
+            .sort((a, b) => {
+              if (a.hasChildren !== b.hasChildren) return Number(a.hasChildren) - Number(b.hasChildren);
+              return a.order - b.order;
+            });
+
+          const rightPartners = partners
+            .map(id => ({ id, ...partnerMeta.get(id)! }))
+            .filter(partner => partner.side === 'right')
+            .sort((a, b) => {
+              if (a.hasChildren !== b.hasChildren) return Number(b.hasChildren) - Number(a.hasChildren);
+              return a.order - b.order;
+            });
+
+          const members = [
+            ...leftPartners.map(partner => partner.id),
+            childId,
+            ...rightPartners.map(partner => partner.id)
+          ];
+
+          const gaps: number[] = [];
+          for (let i = 0; i < members.length - 1; i += 1) {
+            const leftId = members[i];
+            const rightId = members[i + 1];
+
+            let gap = COUPLE_GAP;
+            if (leftId === childId || rightId === childId) {
+              const partnerId = leftId === childId ? rightId : leftId;
+              const partnerInfo = partnerMeta.get(partnerId);
+              gap = partnerInfo?.hasChildren ? COUPLE_GAP : CHILDLESS_SPOUSE_GAP;
+            }
+            gaps.push(gap);
           }
+
+          const unitWidth = members.length * PERSON_WIDTH + gaps.reduce((sum, gap) => sum + gap, 0);
+          const childIndex = members.indexOf(childId);
+          let childOffset = PERSON_WIDTH / 2;
+          for (let i = 0; i < childIndex; i += 1) {
+            childOffset += PERSON_WIDTH;
+            childOffset += gaps[i] ?? 0;
+          }
+
+          childUnits.push({
+            childId,
+            members,
+            gaps,
+            partners,
+            width: unitWidth,
+            childOffset
+          });
+        });
+
+        if (childUnits.length === 0) return;
+
+        const unitLayouts = childUnits.map(unit => ({
+          unit,
+          width: unit.width,
+          childOffset: unit.childOffset,
+          baselineLeft: 0,
+          left: 0
+        }));
+
+        let totalWidth = childUnits.reduce((sum, unit) => sum + unit.width, 0);
+        if (childUnits.length > 1) {
+          totalWidth += (childUnits.length - 1) * CHILDREN_GAP;
         }
 
-        const effectiveWidth = Math.max(childrenWidth, parentWidth * 0.9);
-        let currentX = parentCenterX - effectiveWidth / 2 + PERSON_WIDTH / 2;
+        let baselineLeft = parentCenterX - totalWidth / 2;
+        unitLayouts.forEach(layout => {
+          layout.baselineLeft = baselineLeft;
+          baselineLeft += layout.width + CHILDREN_GAP;
+        });
 
-        children.forEach((childId, idx) => {
-          positionedPersons.set(childId, { x: currentX, y, generation });
-          elements.push({ type: 'person', id: childId, x: currentX, y, generation });
+        let minLeft = Number.NEGATIVE_INFINITY;
+        unitLayouts.forEach(layout => {
+          const childPosition = familyTree.persons[layout.unit.childId]?.position;
+          const canAnchor = Boolean(!forceOrder && childPosition && childPosition.generation === generation);
+          const desiredLeft = canAnchor ? childPosition.x - layout.childOffset : layout.baselineLeft;
+          const left = Math.max(desiredLeft, minLeft);
+          layout.left = left;
+          minLeft = left + layout.width + CHILDREN_GAP;
+        });
 
-          if (idx < numChildren - 1) {
-            const currentChild = familyTree.persons[childId];
-            const nextChildId = children[idx + 1];
-            const arePartners = currentChild?.unionIds.some(uid => {
-              const u = familyTree.unions[uid];
-              return u && u.partnerIds.includes(nextChildId);
-            });
+        unitLayouts.forEach(layout => {
+          const { unit } = layout;
+          let cursor = layout.left;
 
-            // Add union symbol between partners
-            if (arePartners) {
-              const sharedUnion = currentChild?.unionIds
+          unit.members.forEach((memberId, memberIdx) => {
+            const x = cursor + PERSON_WIDTH / 2;
+            positionedPersons.set(memberId, { x, y, generation });
+            elements.push({ type: 'person', id: memberId, x, y, generation });
+            enforcedPositions.add(memberId);
+            clusterMembers.add(memberId);
+
+            cursor += PERSON_WIDTH;
+            if (memberIdx < unit.gaps.length) {
+              cursor += unit.gaps[memberIdx];
+            }
+          });
+
+          const childPos = positionedPersons.get(unit.childId);
+          if (childPos) {
+            unit.partners.forEach(partnerId => {
+              const partnerPos = positionedPersons.get(partnerId);
+              if (!partnerPos) return;
+
+              const child = familyTree.persons[unit.childId];
+              const sharedUnion = child?.unionIds
                 .map(uid => familyTree.unions[uid])
-                .find(u => u && u.partnerIds.includes(nextChildId));
+                .find(u => u && u.partnerIds.includes(partnerId));
 
               if (sharedUnion && !positionedUnions.has(sharedUnion.id)) {
-                const symbolX = currentX + PERSON_WIDTH / 2 + COUPLE_GAP / 2;
+                const symbolX = (childPos.x + partnerPos.x) / 2;
                 const symbolY = y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
 
                 positionedUnions.set(sharedUnion.id, { x: symbolX, y: symbolY, generation });
@@ -685,19 +900,75 @@ export const FamilyTreeView = () => {
                   unionId: sharedUnion.id
                 });
               }
-              currentX += PERSON_WIDTH + COUPLE_GAP;
-            } else {
-              currentX += PERSON_WIDTH + CHILDREN_GAP;
-            }
+            });
           }
         });
+
+        if (clusterMembers.size > 0) {
+          let minX = Infinity;
+          let maxX = -Infinity;
+          clusterMembers.forEach(memberId => {
+            const pos = positionedPersons.get(memberId);
+            if (!pos) return;
+            minX = Math.min(minX, pos.x - PERSON_WIDTH / 2);
+            maxX = Math.max(maxX, pos.x + PERSON_WIDTH / 2);
+          });
+
+          if (minX < Infinity && maxX > -Infinity) {
+            const unionOrder = Math.min(
+              ...parentUnion.partnerIds.map(parentId => {
+                const order = familyTree.persons[parentId]?.unionIds.indexOf(parentUnionId);
+                return typeof order === 'number' && order >= 0 ? order : Number.POSITIVE_INFINITY;
+              })
+            );
+
+            childClusters.push({
+              unionId: parentUnionId,
+              parentCenterX,
+              unionOrder,
+              memberIds: new Set(clusterMembers),
+              minX,
+              maxX
+            });
+          }
+        }
       });
 
+      if (childClusters.length > 1) {
+        childClusters.sort((a, b) => {
+          const delta = a.parentCenterX - b.parentCenterX;
+          if (Math.abs(delta) > 1) return delta;
+          return a.unionOrder - b.unionOrder;
+        });
+        let nextMinX = Number.NEGATIVE_INFINITY;
+
+        childClusters.forEach(cluster => {
+          const desiredMinX = cluster.minX;
+          const minX = Math.max(desiredMinX, nextMinX);
+          const shift = minX - cluster.minX;
+          if (Math.abs(shift) > 0.5) {
+            cluster.memberIds.forEach(memberId => {
+              const pos = positionedPersons.get(memberId);
+              if (pos) pos.x += shift;
+            });
+            elements.forEach(el => {
+              if (el.type === 'person' && cluster.memberIds.has(el.id)) {
+                el.x += shift;
+              }
+            });
+            cluster.minX += shift;
+            cluster.maxX += shift;
+          }
+          nextMinX = cluster.maxX + UNION_CLUSTER_GAP;
+        });
+      }
+
       // Now handle persons without positioned parents (or who are the root generation)
-      if (personsWithoutParents.length > 0) {
+      const remainingWithoutParents = personsWithoutParents.filter(personId => !positionedPersons.has(personId));
+      if (remainingWithoutParents.length > 0) {
         // Group by union relationships
         const personIndexById = new Map<string, number>();
-        personsWithoutParents.forEach((personId, index) => {
+        remainingWithoutParents.forEach((personId, index) => {
           personIndexById.set(personId, index);
         });
 
@@ -708,7 +979,7 @@ export const FamilyTreeView = () => {
         const multiUnionGroups = new Map<string, { centralPerson: string; allPartners: Set<string>; firstIndex: number }>();
         const processedInMultiUnion = new Set<string>();
 
-        personsWithoutParents.forEach(personId => {
+        remainingWithoutParents.forEach(personId => {
           const person = familyTree.persons[personId];
           if (!person || person.unionIds.length < 2) return;
 
@@ -720,7 +991,8 @@ export const FamilyTreeView = () => {
             if (!union) return;
 
             union.partnerIds.forEach(partnerId => {
-              if (personGenerations.get(partnerId) === generation && personsWithoutParents.includes(partnerId)) {
+              const partnerGen = familyTree.persons[partnerId]?.position?.generation ?? personGenerations.get(partnerId);
+              if (partnerGen === generation && remainingWithoutParents.includes(partnerId)) {
                 allPartners.add(partnerId);
               }
             });
@@ -740,7 +1012,7 @@ export const FamilyTreeView = () => {
         // Build union groups for single unions
         const unionGroups = new Map<string, { unionId: string; members: Set<string>; firstIndex: number }>();
 
-        personsWithoutParents.forEach(personId => {
+        remainingWithoutParents.forEach(personId => {
           if (processedInMultiUnion.has(personId)) return;
 
           const person = familyTree.persons[personId];
@@ -752,7 +1024,7 @@ export const FamilyTreeView = () => {
 
             const partnersInGen = union.partnerIds.filter(partnerId =>
               !processedInMultiUnion.has(partnerId) &&
-              personsWithoutParents.includes(partnerId)
+              remainingWithoutParents.includes(partnerId)
             );
 
             if (partnersInGen.length > 0) {
@@ -779,34 +1051,17 @@ export const FamilyTreeView = () => {
 
           if (members.length === 0) return;
 
-          // Sort: males on left, females on right
+          // Sort: females on left, males on right
           // Among same gender: those with children closer to opposite gender
           members.sort((a, b) => {
             const personA = familyTree.persons[a];
             const personB = familyTree.persons[b];
 
-            // Females always on right, males on left
-            if (personA?.gender === 'female' && personB?.gender !== 'female') return 1;
-            if (personB?.gender === 'female' && personA?.gender !== 'female') return -1;
+            // Females always on left, males on right
+            if (personA?.gender === 'female' && personB?.gender !== 'female') return -1;
+            if (personB?.gender === 'female' && personA?.gender !== 'female') return 1;
 
-            // Among males: those with children closer to right (females)
-            if (personA?.gender === 'male' && personB?.gender === 'male') {
-              const aHasChildren = personA.unionIds.some(uid => {
-                const u = familyTree.unions[uid];
-                return u && u.childIds.length > 0 && members.some(m => u.partnerIds.includes(m) && m !== a);
-              });
-
-              const bHasChildren = personB.unionIds.some(uid => {
-                const u = familyTree.unions[uid];
-                return u && u.childIds.length > 0 && members.some(m => u.partnerIds.includes(m) && m !== b);
-              });
-
-              // Males with children go right (closer to females)
-              if (aHasChildren && !bHasChildren) return 1;
-              if (bHasChildren && !aHasChildren) return -1;
-            }
-
-            // Among females: those with children closer to left (males)
+            // Among females: those with children closer to right (males)
             if (personA?.gender === 'female' && personB?.gender === 'female') {
               const aHasChildren = personA.unionIds.some(uid => {
                 const u = familyTree.unions[uid];
@@ -818,7 +1073,24 @@ export const FamilyTreeView = () => {
                 return u && u.childIds.length > 0 && members.some(m => u.partnerIds.includes(m) && m !== b);
               });
 
-              // Females with children go left (closer to males)
+              // Females with children go right (closer to males)
+              if (aHasChildren && !bHasChildren) return 1;
+              if (bHasChildren && !aHasChildren) return -1;
+            }
+
+            // Among males: those with children closer to left (females)
+            if (personA?.gender === 'male' && personB?.gender === 'male') {
+              const aHasChildren = personA.unionIds.some(uid => {
+                const u = familyTree.unions[uid];
+                return u && u.childIds.length > 0 && members.some(m => u.partnerIds.includes(m) && m !== a);
+              });
+
+              const bHasChildren = personB.unionIds.some(uid => {
+                const u = familyTree.unions[uid];
+                return u && u.childIds.length > 0 && members.some(m => u.partnerIds.includes(m) && m !== b);
+              });
+
+              // Males with children go left (closer to females)
               if (aHasChildren && !bHasChildren) return -1;
               if (bHasChildren && !aHasChildren) return 1;
             }
@@ -840,12 +1112,13 @@ export const FamilyTreeView = () => {
 
           if (members.length === 0) return;
 
+          // Females on left, males on right
           members.sort((a, b) => {
             const personA = familyTree.persons[a];
             const personB = familyTree.persons[b];
 
-            if (personA?.gender === 'female' && personB?.gender !== 'female') return 1;
-            if (personB?.gender === 'female' && personA?.gender !== 'female') return -1;
+            if (personA?.gender === 'female' && personB?.gender !== 'female') return -1;
+            if (personB?.gender === 'female' && personA?.gender !== 'female') return 1;
             return 0;
           });
 
@@ -854,7 +1127,7 @@ export const FamilyTreeView = () => {
         });
 
         // Add remaining unpositioned persons
-        personsWithoutParents.forEach(personId => {
+        remainingWithoutParents.forEach(personId => {
           if (positionedInGen.has(personId)) return;
           positionedInGen.add(personId);
           allGroups.push([personId]);
@@ -917,83 +1190,6 @@ export const FamilyTreeView = () => {
         });
       }
 
-      // STEP 3.5: Resolve overlaps within this generation
-      // Get all persons positioned in this generation
-      const personsInThisGen = Array.from(positionedPersons.entries())
-        .filter(([, pos]) => pos.generation === generation)
-        .map(([id, pos]) => ({ id, x: pos.x }))
-        .sort((a, b) => a.x - b.x);
-
-      if (personsInThisGen.length > 1) {
-        const minSpacing = PERSON_WIDTH + SIBLING_GAP;
-        let hasOverlap = true;
-        let iterations = 0;
-        const maxIterations = 20;
-
-        while (hasOverlap && iterations < maxIterations) {
-          hasOverlap = false;
-          iterations += 1;
-
-          for (let i = 0; i < personsInThisGen.length - 1; i += 1) {
-            const current = personsInThisGen[i];
-            const next = personsInThisGen[i + 1];
-            const spacing = next.x - current.x;
-
-            // Check if they're partners (need less spacing)
-            const currentPerson = familyTree.persons[current.id];
-            const arePartners = currentPerson?.unionIds.some(uid => {
-              const u = familyTree.unions[uid];
-              return u && u.partnerIds.includes(next.id);
-            });
-
-            const requiredSpacing = arePartners ? PERSON_WIDTH + COUPLE_GAP : minSpacing;
-
-            if (spacing < requiredSpacing) {
-              hasOverlap = true;
-              const overlap = requiredSpacing - spacing;
-              const shiftAmount = overlap / 2 + 1;
-
-              // Shift current left and next right
-              current.x -= shiftAmount;
-              next.x += shiftAmount;
-
-              // Update the actual positions
-              const currentPos = positionedPersons.get(current.id);
-              const nextPos = positionedPersons.get(next.id);
-              if (currentPos) currentPos.x = current.x;
-              if (nextPos) nextPos.x = next.x;
-
-              // Update in elements array
-              elements.forEach(el => {
-                if (el.type === 'person' && el.id === current.id) el.x = current.x;
-                if (el.type === 'person' && el.id === next.id) el.x = next.x;
-              });
-            }
-          }
-
-          // Re-sort after adjustments
-          personsInThisGen.sort((a, b) => a.x - b.x);
-        }
-
-        // Also update union symbol positions between partners after overlap resolution
-        elements.forEach(el => {
-          if (el.type === 'union-symbol' && el.generation === generation) {
-            const union = familyTree.unions[el.id];
-            if (!union) return;
-
-            const partnerPositions = union.partnerIds
-              .map(id => positionedPersons.get(id))
-              .filter(Boolean) as { x: number; y: number; generation: number }[];
-
-            if (partnerPositions.length >= 2) {
-              const newX = (partnerPositions[0].x + partnerPositions[1].x) / 2;
-              el.x = newX;
-              const unionPos = positionedUnions.get(el.id);
-              if (unionPos) unionPos.x = newX;
-            }
-          }
-        });
-      }
     });
 
     // STEP 4: Add union symbols for parent-child relationships (unions not yet added)
@@ -1027,8 +1223,95 @@ export const FamilyTreeView = () => {
       }
     });
 
-    return { visibleElements: elements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons };
+    // STEP 5: Override calculated positions with saved positions to keep layout stable
+    elements.forEach(element => {
+      if (element.type !== 'person') return;
+      const person = familyTree.persons[element.id];
+      if (!person?.position) return;
+      if (enforcedPositions.has(element.id)) return;
+      // Use saved position
+      element.x = person.position.x;
+      element.generation = person.position.generation;
+      element.y = person.position.generation * GENERATION_GAP;
+
+      // Update positionedPersons map for connection rendering
+      const existingPos = positionedPersons.get(element.id);
+      if (existingPos) {
+        existingPos.x = element.x;
+        existingPos.y = element.y;
+        existingPos.generation = element.generation;
+      }
+    });
+
+    // STEP 6: Update union symbol positions based on partner positions
+    elements.forEach(element => {
+      if (element.type !== 'union-symbol') return;
+      const union = familyTree.unions[element.id];
+      if (!union) return;
+
+      const partnerPositions = union.partnerIds
+        .map(id => positionedPersons.get(id))
+        .filter(Boolean) as { x: number; y: number; generation: number }[];
+
+      if (partnerPositions.length >= 2) {
+        const newX = (partnerPositions[0].x + partnerPositions[1].x) / 2;
+        const newY = partnerPositions[0].y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
+        const newGeneration = partnerPositions[0].generation;
+        element.x = newX;
+        element.y = newY;
+        element.generation = newGeneration;
+
+        const unionPos = positionedUnions.get(element.id);
+        if (unionPos) {
+          unionPos.x = newX;
+          unionPos.y = newY;
+          unionPos.generation = newGeneration;
+        }
+      } else if (partnerPositions.length === 1) {
+        element.x = partnerPositions[0].x;
+        element.y = partnerPositions[0].y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
+        element.generation = partnerPositions[0].generation;
+      }
+    });
+
+    return { visibleElements: elements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons, enforcedPositions };
   }, [familyTree, focusedPersonId, expandedPersons, getAncestorSide]);
+
+  // Save positions for new persons and for enforced layout groups
+  useEffect(() => {
+    if (!familyTree) return;
+
+    const personsToUpdate: { id: string; x: number; generation: number }[] = [];
+    const POSITION_TOLERANCE = 0.5;
+
+    // First, save positions for persons without saved positions
+    visibleElements.forEach(element => {
+      if (element.type !== 'person') return;
+      const person = familyTree.persons[element.id];
+      if (!person) return;
+
+      const shouldPersist = !person.position || enforcedPositions.has(element.id);
+      if (!shouldPersist) return;
+
+      const needsUpdate = !person.position
+        || person.position.generation !== element.generation
+        || Math.abs(person.position.x - element.x) > POSITION_TOLERANCE;
+
+      if (needsUpdate) {
+        personsToUpdate.push({
+          id: element.id,
+          x: element.x,
+          generation: element.generation,
+        });
+      }
+    });
+
+    // Save positions for all persons that need it
+    personsToUpdate.forEach(({ id, x, generation }) => {
+      updatePerson(id, { position: { x, generation } });
+    });
+
+  }, [familyTree, visibleElements, enforcedPositions, updatePerson]);
 
   const _personGenerationMap = useMemo(() => {
     const map = new Map<string, number>();
@@ -1619,7 +1902,6 @@ export const FamilyTreeView = () => {
       if (!union) return;
 
       const symbolOffset = unionSymbolOffsets.get(element.id) ?? 0;
-      const symbolXOffset = unionSymbolXOffsets.get(element.id) ?? 0;
       const childPositions = union.childIds
         .map(id => personPositions.get(id))
         .filter(Boolean) as PositionedElement[];
@@ -1634,7 +1916,7 @@ export const FamilyTreeView = () => {
 
       const minChildX = Math.min(...childPositions.map(child => child.x));
       const maxChildX = Math.max(...childPositions.map(child => child.x));
-      const symbolX = element.x + symbolXOffset;
+      const symbolX = element.x;
       const symbolY = element.y + SYMBOL_SIZE / 2 + symbolOffset;
       const minX = Math.min(symbolX, minChildX);
       const maxX = Math.max(symbolX, maxChildX);
@@ -1715,8 +1997,7 @@ export const FamilyTreeView = () => {
       if (!union) return;
 
       const symbolOffset = unionSymbolOffsets.get(element.id) ?? 0;
-      const symbolXOffset = unionSymbolXOffsets.get(element.id) ?? 0;
-      const symbolX = element.x + symbolXOffset;
+      const symbolX = element.x;
       const symbolY = element.y + SYMBOL_SIZE / 2 + symbolOffset;
 
       const partnerPositions = union.partnerIds
@@ -1996,6 +2277,11 @@ export const FamilyTreeView = () => {
         <button className="zoom-button fit-button" onClick={handleFitToScreen} title="Zentrieren und anpassen">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M3 5v4h2V5h4V3H5c-1.1 0-2 .9-2 2zm2 10H3v4c0 1.1.9 2 2 2h4v-2H5v-4zm14 4h-4v2h4c1.1 0 2-.9 2-2v-4h-2v4zm0-16h-4v2h4v4h2V5c0-1.1-.9-2-2-2z"/>
+          </svg>
+        </button>
+        <button className="zoom-button" onClick={handleResetPositions} title="Positionen neu berechnen">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
           </svg>
         </button>
       </div>

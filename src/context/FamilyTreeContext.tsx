@@ -80,6 +80,7 @@ const normalizeTree = (tree: any): FamilyTree => {
       photo: person.photo,
       parentUnionId: person.parentUnionId ?? null,
       unionIds: [],
+      position: person.position, // Preserve saved position
     };
   });
 

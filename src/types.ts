@@ -15,6 +15,11 @@ export interface Union {
   childIds: string[];
 }
 
+export interface PersonPosition {
+  x: number;
+  generation: number;
+}
+
 export interface Person {
   id: string;
   firstName?: string;
@@ -28,6 +33,7 @@ export interface Person {
   photo?: string;
   parentUnionId: string | null;
   unionIds: string[];
+  position?: PersonPosition;
 }
 
 export interface FamilyTree {
