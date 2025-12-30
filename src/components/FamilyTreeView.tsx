@@ -1468,6 +1468,7 @@ export const FamilyTreeView = () => {
       baseY: number;
       minY: number;
       maxY: number;
+      partnerIds: string[];
     };
 
     const unionsByGeneration = new Map<number, SpouseEntry[]>();
@@ -1482,14 +1483,17 @@ export const FamilyTreeView = () => {
 
       if (partnerPositions.length < 2) return;
 
+      const partnerIds = union.partnerIds.filter(id => personPositions.has(id));
+      if (partnerIds.length < 2) return;
+
       const minX = Math.min(...partnerPositions.map(partner => partner.x));
       const maxX = Math.max(...partnerPositions.map(partner => partner.x));
-      const baseY = partnerPositions.reduce((sum, partner) => sum + partner.y + PERSON_HEIGHT / 2, 0) / partnerPositions.length;
+      const baseY = partnerPositions.reduce((sum, partner) => sum + partner.y + AVATAR_VISUAL_CENTER, 0) / partnerPositions.length;
       const rowTop = Math.min(...partnerPositions.map(partner => partner.y));
       const minY = rowTop + SPOUSE_MIN_OFFSET;
       const maxY = rowTop + PERSON_HEIGHT - SPOUSE_TEXT_CLEARANCE;
 
-      const entry: SpouseEntry = { unionId: element.id, minX, maxX, baseY, minY, maxY };
+      const entry: SpouseEntry = { unionId: element.id, minX, maxX, baseY, minY, maxY, partnerIds };
 
       if (!unionsByGeneration.has(element.generation)) {
         unionsByGeneration.set(element.generation, []);
@@ -1498,12 +1502,26 @@ export const FamilyTreeView = () => {
     });
 
     unionsByGeneration.forEach(entries => {
-      entries.sort((a, b) => a.minX - b.minX);
+      const unionCountByPerson = new Map<string, number>();
+
+      entries.forEach(entry => {
+        entry.partnerIds.forEach(partnerId => {
+          unionCountByPerson.set(partnerId, (unionCountByPerson.get(partnerId) ?? 0) + 1);
+        });
+      });
+
+      const offsetEntries = entries.filter(entry =>
+        entry.partnerIds.some(partnerId => (unionCountByPerson.get(partnerId) ?? 0) > 1)
+      );
+
+      if (offsetEntries.length === 0) return;
+
+      offsetEntries.sort((a, b) => a.minX - b.minX);
 
       const layers: { maxX: number }[] = [];
       const layerAssignments: number[] = [];
 
-      entries.forEach(entry => {
+      offsetEntries.forEach(entry => {
         let layerIndex = -1;
 
         for (let i = 0; i < layers.length; i += 1) {
@@ -1523,16 +1541,16 @@ export const FamilyTreeView = () => {
       });
 
       const layerCount = layers.length;
-      const availableOffsets = entries.map(entry =>
+      const availableOffsets = offsetEntries.map(entry =>
         Math.max(0, Math.min(entry.baseY - entry.minY, entry.maxY - entry.baseY))
       );
       const maxOffset = Math.min(SPOUSE_MAX_OFFSET, Math.min(...availableOffsets));
-      const minSeparation = SYMBOL_SIZE + 6;
+      const minSeparation = SYMBOL_RADIUS + 6;
       const desiredStep = Math.max(SPOUSE_LINE_STEP, minSeparation);
       const maxStep = layerCount > 1 ? (maxOffset * 2) / (layerCount - 1) : 0;
       const step = layerCount > 1 ? Math.min(desiredStep, maxStep) : 0;
 
-      entries.forEach((entry, idx) => {
+      offsetEntries.forEach((entry, idx) => {
         const offset = (layerAssignments[idx] - (layerCount - 1) / 2) * step;
         const unclampedY = entry.baseY + offset;
         const clampedY = Math.min(entry.maxY, Math.max(entry.minY, unclampedY));
