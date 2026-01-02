@@ -1,0 +1,24 @@
+{
+  "name": "Familienstammbaum",
+  "short_name": "Stammbaum",
+  "description": "Family tree app",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#2f2c7e",
+  "background_color": "#1f1d4d",
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

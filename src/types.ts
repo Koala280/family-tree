@@ -24,6 +24,7 @@ export interface Person {
   id: string;
   firstName?: string;
   lastName?: string;
+  lastNames?: string[];
   gender: Gender;
   birthDate: DateInfo;
   deathDate: DateInfo;

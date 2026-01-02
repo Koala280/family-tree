@@ -1,5 +1,7 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import { Person, FamilyTree, FamilyTreesData, FamilyTreeMetadata, Union, UnionStatus } from '../types';
+import { PasswordModal } from '../components/PasswordModal';
+import { translations, isLanguageCode, type LanguageCode } from '../i18n';
 
 interface FamilyTreeContextType {
   // Current tree operations
@@ -17,24 +19,146 @@ interface FamilyTreeContextType {
   // Tree management operations
   allTrees: Record<string, FamilyTreeMetadata>;
   activeTreeId: string | null;
-  currentView: 'manager' | 'tree';
-  setCurrentView: (view: 'manager' | 'tree') => void;
+  currentView: 'manager' | 'tree' | 'table';
+  setCurrentView: (view: 'manager' | 'tree' | 'table') => void;
   createTree: (name: string) => void;
   selectTree: (treeId: string) => void;
   renameTree: (treeId: string, newName: string) => void;
   deleteTree: (treeId: string) => void;
   exportTree: (treeId: string) => void;
   importTree: () => void;
+  openTableView: (treeId: string) => void;
+
+  // UI language
+  language: LanguageCode;
+  setLanguage: (language: LanguageCode) => void;
 }
 
 const FamilyTreeContext = createContext<FamilyTreeContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'family-trees-data';
+const LANGUAGE_KEY = 'family-tree-language';
+const ENCRYPTION_VERSION = 1;
+const ENCRYPTION_ITERATIONS = 310000;
+const ENCRYPTION_SALT_BYTES = 16;
+const ENCRYPTION_IV_BYTES = 12;
+const ENCRYPTION_TYPE = 'family-tree-export';
+
+type PasswordModalState = {
+  title: string;
+  description?: string;
+  confirmLabel: string;
+  requireConfirm: boolean;
+  minLength: number;
+};
+
+const createId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    const toHex = (value: number) => value.toString(16).padStart(2, '0');
+    const hex = Array.from(bytes, toHex).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const encodeBase64 = (bytes: Uint8Array) => {
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+};
+
+const decodeBase64 = (value: string) => {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const deriveEncryptionKey = async (password: string, salt: Uint8Array, iterations: number) => {
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(password),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt,
+      iterations,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+};
+
+const encryptExportPayload = async (payload: unknown, password: string) => {
+  const encoder = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(ENCRYPTION_SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(ENCRYPTION_IV_BYTES));
+  const key = await deriveEncryptionKey(password, salt, ENCRYPTION_ITERATIONS);
+  const ciphertextBuffer = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    encoder.encode(JSON.stringify(payload))
+  );
+
+  return {
+    version: ENCRYPTION_VERSION,
+    type: ENCRYPTION_TYPE,
+    kdf: {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      iterations: ENCRYPTION_ITERATIONS,
+      salt: encodeBase64(salt),
+    },
+    cipher: {
+      name: 'AES-GCM',
+      iv: encodeBase64(iv),
+    },
+    ciphertext: encodeBase64(new Uint8Array(ciphertextBuffer)),
+  };
+};
+
+const decryptExportPayload = async (payload: any, password: string) => {
+  if (!payload || payload.type !== ENCRYPTION_TYPE || payload.version !== ENCRYPTION_VERSION) {
+    throw new Error('Unsupported encrypted export format.');
+  }
+
+  const salt = decodeBase64(payload.kdf?.salt ?? '');
+  const iv = decodeBase64(payload.cipher?.iv ?? '');
+  const iterations = Number(payload.kdf?.iterations ?? ENCRYPTION_ITERATIONS);
+  const key = await deriveEncryptionKey(password, salt, iterations);
+  const ciphertext = decodeBase64(payload.ciphertext ?? '');
+  const plaintextBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  const decoder = new TextDecoder();
+  return JSON.parse(decoder.decode(plaintextBuffer));
+};
 
 const createEmptyPerson = (): Person => ({
-  id: crypto.randomUUID(),
+  id: createId(),
   firstName: '',
   lastName: '',
+  lastNames: [],
   gender: null,
   birthDate: {},
   deathDate: {},
@@ -56,7 +180,7 @@ const createEmptyTree = (): FamilyTree => {
 };
 
 const createUnion = (partnerIds: string[], status: UnionStatus = 'active'): Union => ({
-  id: crypto.randomUUID(),
+  id: createId(),
   partnerIds: Array.from(new Set(partnerIds)),
   status,
   childIds: [],
@@ -70,7 +194,12 @@ const normalizeTree = (tree: any): FamilyTree => {
     persons[person.id] = {
       id: person.id,
       firstName: person.firstName ?? '',
-      lastName: person.lastName ?? '',
+      lastName: person.lastName ?? (Array.isArray(person.lastNames) ? person.lastNames[0] ?? '' : ''),
+      lastNames: Array.isArray(person.lastNames)
+        ? person.lastNames
+        : person.lastName
+          ? [person.lastName]
+          : [],
       gender: person.gender ?? null,
       birthDate: person.birthDate ?? {},
       deathDate: person.deathDate ?? {},
@@ -124,13 +253,54 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     };
   });
 
-  const [currentView, setCurrentView] = useState<'manager' | 'tree'>(() => {
+  const [currentView, setCurrentView] = useState<'manager' | 'tree' | 'table'>(() => {
     return treesData.activeTreeId ? 'tree' : 'manager';
   });
+  const [language, setLanguage] = useState<LanguageCode>(() => {
+    const stored = localStorage.getItem(LANGUAGE_KEY);
+    if (isLanguageCode(stored)) {
+      return stored;
+    }
+    const browserLang = typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : '';
+    if (browserLang.startsWith('lv')) return 'lv';
+    if (browserLang.startsWith('en')) return 'en';
+    return 'de';
+  });
+  const [passwordModal, setPasswordModal] = useState<PasswordModalState | null>(null);
+  const passwordResolverRef = useRef<((value: string | null) => void) | null>(null);
+  const copy = translations[language];
+
+  const requestPassword = (options: PasswordModalState) => {
+    return new Promise<string | null>((resolve) => {
+      passwordResolverRef.current = resolve;
+      setPasswordModal(options);
+    });
+  };
+
+  const handlePasswordCancel = () => {
+    if (passwordResolverRef.current) {
+      passwordResolverRef.current(null);
+    }
+    passwordResolverRef.current = null;
+    setPasswordModal(null);
+  };
+
+  const handlePasswordSubmit = (value: string) => {
+    if (passwordResolverRef.current) {
+      passwordResolverRef.current(value);
+    }
+    passwordResolverRef.current = null;
+    setPasswordModal(null);
+  };
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(treesData));
   }, [treesData]);
+
+  useEffect(() => {
+    localStorage.setItem(LANGUAGE_KEY, language);
+    document.documentElement.lang = language;
+  }, [language]);
 
   const currentTree = treesData.activeTreeId ? treesData.trees[treesData.activeTreeId] : null;
 
@@ -158,6 +328,9 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
       ...createEmptyPerson(),
       ...personData,
     };
+    if (Array.isArray(newPerson.lastNames) && !newPerson.lastName) {
+      newPerson.lastName = newPerson.lastNames.find(name => name.trim().length > 0) ?? '';
+    }
 
     updateCurrentTree(tree => ({
       ...tree,
@@ -171,13 +344,18 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const updatePerson = (id: string, updates: Partial<Person>) => {
+    const nextUpdates = { ...updates };
+    if (Array.isArray(updates.lastNames) && updates.lastName === undefined) {
+      const primary = updates.lastNames.find(name => name.trim().length > 0) ?? '';
+      nextUpdates.lastName = primary;
+    }
     updateCurrentTree(tree => ({
       ...tree,
       persons: {
         ...tree.persons,
         [id]: {
           ...tree.persons[id],
-          ...updates,
+          ...nextUpdates,
         },
       },
     }));
@@ -548,7 +726,7 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
 
   // Tree management functions
   const createTree = (name: string) => {
-    const treeId = crypto.randomUUID();
+    const treeId = createId();
     const now = new Date().toISOString();
 
     setTreesData(prev => ({
@@ -577,6 +755,14 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
       activeTreeId: treeId,
     }));
     setCurrentView('tree');
+  };
+
+  const openTableView = (treeId: string) => {
+    setTreesData(prev => ({
+      ...prev,
+      activeTreeId: treeId,
+    }));
+    setCurrentView('table');
   };
 
   const renameTree = (treeId: string, newName: string) => {
@@ -629,59 +815,111 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
       exportedAt: new Date().toISOString(),
     };
 
-    const dataStr = JSON.stringify(exportData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${metadata.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
+    if (!crypto?.subtle || !crypto?.getRandomValues) {
+      alert(copy.encryptionUnavailable);
+      return;
+    }
+
+    void (async () => {
+      const password = await requestPassword({
+        title: copy.exportTitle,
+        description: copy.exportDescription,
+        confirmLabel: copy.exportConfirm,
+        requireConfirm: true,
+        minLength: 12,
+      });
+      if (!password) return;
+      try {
+        const encryptedPayload = await encryptExportPayload(exportData, password);
+        const dataStr = JSON.stringify(encryptedPayload, null, 2);
+        const dataBlob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(dataBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${metadata.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-${new Date().toISOString().split('T')[0]}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        alert(copy.exportError);
+      }
+    })();
   };
 
   const importTree = () => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'application/json';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    const cleanup = () => {
+      input.value = '';
+      input.remove();
+    };
     input.onchange = (e: any) => {
       const file = e.target.files[0];
       if (file) {
         const reader = new FileReader();
         reader.onload = (event: any) => {
-          try {
-            const importedData = JSON.parse(event.target.result);
+          void (async () => {
+            try {
+              const rawText = String(event.target.result ?? '');
+              const importedData = JSON.parse(rawText);
+              const decryptedData = importedData?.ciphertext
+                ? await (async () => {
+                    if (!crypto?.subtle || !crypto?.getRandomValues) {
+                      alert(copy.decryptUnavailable);
+                      return null;
+                    }
+                    const password = await requestPassword({
+                      title: copy.importTitle,
+                      description: copy.importDescription,
+                      confirmLabel: copy.importConfirm,
+                      requireConfirm: false,
+                      minLength: 1,
+                    });
+                    if (!password) return null;
+                    return decryptExportPayload(importedData, password);
+                  })()
+                : importedData;
 
-            // Import format with metadata
-            if (importedData.tree && importedData.metadata) {
-              const newTreeId = crypto.randomUUID();
-              const now = new Date().toISOString();
-              const normalizedTree = normalizeTree(importedData.tree);
+              if (!decryptedData) return;
 
-              setTreesData(prev => ({
-                trees: {
-                  ...prev.trees,
-                  [newTreeId]: normalizedTree,
-                },
-                metadata: {
-                  ...prev.metadata,
-                  [newTreeId]: {
-                    ...importedData.metadata,
-                    id: newTreeId,
-                    createdAt: now,
-                    updatedAt: now,
+              // Import format with metadata
+              if (decryptedData.tree && decryptedData.metadata) {
+                const newTreeId = createId();
+                const now = new Date().toISOString();
+                const normalizedTree = normalizeTree(decryptedData.tree);
+
+                setTreesData(prev => ({
+                  trees: {
+                    ...prev.trees,
+                    [newTreeId]: normalizedTree,
                   },
-                },
-                activeTreeId: newTreeId,
-              }));
+                  metadata: {
+                    ...prev.metadata,
+                    [newTreeId]: {
+                      ...decryptedData.metadata,
+                      id: newTreeId,
+                      createdAt: now,
+                      updatedAt: now,
+                    },
+                  },
+                  activeTreeId: newTreeId,
+                }));
 
-              setCurrentView('tree');
+                setCurrentView('tree');
+                return;
+              }
+
+              alert(copy.importUnknownFormat);
+            } catch (error) {
+              alert(copy.importError);
             }
-          } catch (error) {
-            alert('Fehler beim Importieren der Datei. Bitte überprüfen Sie das Dateiformat.');
-          }
+          })();
         };
         reader.readAsText(file);
       }
+      cleanup();
     };
     input.click();
   };
@@ -705,13 +943,28 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
         setCurrentView,
         createTree,
         selectTree,
+        openTableView,
         renameTree,
         deleteTree,
         exportTree,
         importTree,
+        language,
+        setLanguage,
       }}
     >
       {children}
+      {passwordModal && (
+        <PasswordModal
+          title={passwordModal.title}
+          description={passwordModal.description}
+          confirmLabel={passwordModal.confirmLabel}
+          requireConfirm={passwordModal.requireConfirm}
+          minLength={passwordModal.minLength}
+          language={language}
+          onCancel={handlePasswordCancel}
+          onSubmit={handlePasswordSubmit}
+        />
+      )}
     </FamilyTreeContext.Provider>
   );
 };

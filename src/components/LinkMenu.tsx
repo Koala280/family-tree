@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Union } from '../types';
 import { useFamilyTree } from '../context/FamilyTreeContext';
+import { translations } from '../i18n';
+import { getDisplayName } from '../utils/person';
 
 interface LinkMenuProps {
   personId: string;
@@ -9,14 +11,18 @@ interface LinkMenuProps {
 }
 
 export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
-  const { familyTree, addPerson, addParent, addSpouse, addChild, linkChildToUnion, removeRelationship } = useFamilyTree();
+  const { familyTree, addPerson, addParent, addSpouse, addChild, linkChildToUnion, removeRelationship, language } = useFamilyTree();
   const [linkAction, setLinkAction] = useState<'parent' | 'spouse' | 'child' | null>(null);
   const [pendingChildId, setPendingChildId] = useState<string | null>(null);
+  const copy = translations[language];
+
+  if (!familyTree) return null;
 
   const person = familyTree.persons[personId];
+  if (!person) return null;
 
-  const getDisplayName = (target: { firstName?: string; lastName?: string }) => {
-    return `${target.firstName || ''} ${target.lastName || ''}`.trim();
+  const getTargetName = (target: { firstName?: string; lastName?: string; lastNames?: string[] }) => {
+    return getDisplayName(target as any);
   };
 
   const getPersonUnions = () => {
@@ -30,10 +36,10 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
       .filter(id => id !== personId)
       .map(id => familyTree.persons[id])
       .filter(Boolean)
-      .map(target => getDisplayName(target))
+      .map(target => getTargetName(target))
       .filter(name => name.length > 0);
 
-    if (partnerNames.length === 0) return 'Ohne Partner';
+    if (partnerNames.length === 0) return copy.withoutPartner;
     if (partnerNames.length === 1) return partnerNames[0];
     return partnerNames.join(' & ');
   };
@@ -145,7 +151,7 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
             seen.add(key);
             related.push({
               id,
-              name: getDisplayName(parent),
+              name: getTargetName(parent),
               type: 'parent',
             });
           }
@@ -166,7 +172,7 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
             seen.add(key);
             related.push({
               id,
-              name: getDisplayName(spouse),
+              name: getTargetName(spouse),
               type: 'spouse',
             });
           }
@@ -181,7 +187,7 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
             seen.add(key);
             related.push({
               id,
-              name: getDisplayName(child),
+              name: getTargetName(child),
               type: 'child',
             });
           }
@@ -198,12 +204,12 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
       <div className="modal-overlay" onClick={onClose}>
         <div className="link-menu" onClick={(e) => e.stopPropagation()}>
           <div className="link-menu-header">
-            <button onClick={() => setPendingChildId(null)}>Zurück</button>
-            <span>Kind verlinken mit...</span>
+            <button onClick={() => setPendingChildId(null)}>{copy.linkBack}</button>
+            <span>{copy.linkChildWith}</span>
           </div>
           <div className="link-menu-list">
             {unions.length === 0 ? (
-              <div className="link-menu-item disabled">Keine Personen verfügbar</div>
+              <div className="link-menu-item disabled">{copy.noPersonsAvailable}</div>
             ) : (
               unions.map(union => (
                 <button
@@ -230,12 +236,12 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
       <div className="modal-overlay" onClick={onClose}>
         <div className="link-menu" onClick={(e) => e.stopPropagation()}>
           <div className="link-menu-header">
-            <button onClick={() => setLinkAction(null)}>Zurück</button>
-            <span>Eltern verlinken</span>
+            <button onClick={() => setLinkAction(null)}>{copy.linkBack}</button>
+            <span>{copy.linkParents}</span>
           </div>
           <div className="link-menu-list">
             {availableUnions.length === 0 ? (
-              <div className="link-menu-item disabled">Keine Personen verfügbar</div>
+              <div className="link-menu-item disabled">{copy.noPersonsAvailable}</div>
             ) : (
               availableUnions.map(union => (
                 <button
@@ -262,15 +268,15 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
       <div className="modal-overlay" onClick={onClose}>
         <div className="link-menu" onClick={(e) => e.stopPropagation()}>
           <div className="link-menu-header">
-            <button onClick={() => setLinkAction(null)}>Zurück</button>
+            <button onClick={() => setLinkAction(null)}>{copy.linkBack}</button>
             <span>
-              {linkAction === 'spouse' && 'Ehepartner verlinken'}
-              {linkAction === 'child' && 'Kind verlinken'}
+              {linkAction === 'spouse' && copy.linkSpouse}
+              {linkAction === 'child' && copy.linkChild}
             </span>
           </div>
           <div className="link-menu-list">
             {availablePersons.length === 0 ? (
-              <div className="link-menu-item disabled">Keine Personen verfügbar</div>
+              <div className="link-menu-item disabled">{copy.noPersonsAvailable}</div>
             ) : (
               availablePersons.map(p => (
                 <button
@@ -278,7 +284,7 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
                   className="link-menu-item"
                   onClick={() => handleLinkToPerson(p.id)}
                 >
-                  {getDisplayName(p)}
+                  {getTargetName(p)}
                 </button>
               ))
             )}
@@ -294,12 +300,12 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
       <div className="modal-overlay" onClick={onClose}>
         <div className="link-menu" onClick={(e) => e.stopPropagation()}>
           <div className="link-menu-header">
-            <button onClick={onClose}>Zurück</button>
-            <span>Kind hinzufügen mit...</span>
+            <button onClick={onClose}>{copy.linkBack}</button>
+            <span>{copy.addChildWith}</span>
           </div>
           <div className="link-menu-list">
             {unions.length === 0 ? (
-              <div className="link-menu-item disabled">Keine Personen verfügbar</div>
+              <div className="link-menu-item disabled">{copy.noPersonsAvailable}</div>
             ) : (
               unions.map(union => (
                 <button
@@ -323,22 +329,29 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
       <div className="modal-overlay" onClick={onClose}>
         <div className="link-menu" onClick={(e) => e.stopPropagation()}>
           <div className="link-menu-header">
-            <button onClick={onClose}>Zurück</button>
-            <span>Verknüpfung entfernen</span>
+            <button onClick={onClose}>{copy.linkBack}</button>
+            <span>{copy.removeLink}</span>
           </div>
           <div className="link-menu-list">
             {relatedPersons.length === 0 ? (
-              <div className="link-menu-item disabled">Keine Verknüpfungen vorhanden</div>
+              <div className="link-menu-item disabled">{copy.noLinksAvailable}</div>
             ) : (
-              relatedPersons.map(rel => (
-                <button
-                  key={rel.id}
-                  className="link-menu-item"
-                  onClick={() => handleUnlink(rel.id, rel.type)}
-                >
-                  {rel.name} ({rel.type === 'parent' ? 'Elternteil' : rel.type === 'spouse' ? 'Ehepartner' : 'Kind'})
-                </button>
-              ))
+              relatedPersons.map(rel => {
+                const relationLabel = rel.type === 'parent'
+                  ? copy.relationParent
+                  : rel.type === 'spouse'
+                    ? copy.relationSpouse
+                    : copy.relationChild;
+                return (
+                  <button
+                    key={rel.id}
+                    className="link-menu-item"
+                    onClick={() => handleUnlink(rel.id, rel.type)}
+                  >
+                    {rel.name} ({relationLabel})
+                  </button>
+                );
+              })
             )}
           </div>
         </div>
@@ -350,17 +363,17 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
     <div className="modal-overlay" onClick={onClose}>
       <div className="link-menu" onClick={(e) => e.stopPropagation()}>
         <div className="link-menu-header">
-          <span>Verlinken mit...</span>
+          <span>{copy.linkWith}</span>
         </div>
         <div className="link-menu-list">
           <button className="link-menu-item" onClick={() => setLinkAction('parent')}>
-            Eltern verlinken
+            {copy.linkParents}
           </button>
           <button className="link-menu-item" onClick={() => setLinkAction('spouse')}>
-            Ehepartner verlinken
+            {copy.linkSpouse}
           </button>
           <button className="link-menu-item" onClick={() => setLinkAction('child')}>
-            Kind verlinken
+            {copy.linkChild}
           </button>
         </div>
       </div>

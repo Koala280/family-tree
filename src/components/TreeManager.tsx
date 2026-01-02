@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { FamilyTreeMetadata } from '../types';
+import { useFamilyTree } from '../context/FamilyTreeContext';
+import { translations, getLocale, languageOptions, type LanguageCode } from '../i18n';
 
 interface TreeManagerProps {
   trees: Record<string, FamilyTreeMetadata>;
@@ -10,7 +12,41 @@ interface TreeManagerProps {
   onDeleteTree: (treeId: string) => void;
   onExportTree: (treeId: string) => void;
   onImportTree: () => void;
+  onOpenTable: (treeId: string) => void;
 }
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+};
+
+const renderFlag = (code: LanguageCode) => {
+  switch (code) {
+    case 'de':
+      return (
+        <svg viewBox="0 0 3 2" aria-hidden="true" focusable="false">
+          <rect width="3" height="2" fill="#000" />
+          <rect width="3" height="1.33" y="0.67" fill="#DD0000" />
+          <rect width="3" height="0.67" y="1.33" fill="#FFCE00" />
+        </svg>
+      );
+    case 'lv':
+      return (
+        <svg viewBox="0 0 3 2" aria-hidden="true" focusable="false">
+          <rect width="3" height="2" fill="#9E1B34" />
+          <rect y="0.8" width="3" height="0.4" fill="#F2F2F2" />
+        </svg>
+      );
+    default:
+      return (
+        <svg viewBox="0 0 3 2" aria-hidden="true" focusable="false">
+          <rect width="3" height="2" fill="#FFFFFF" />
+          <rect x="1.1" width="0.8" height="2" fill="#D80027" />
+          <rect y="0.6" width="3" height="0.8" fill="#D80027" />
+        </svg>
+      );
+  }
+};
 
 export const TreeManager = ({
   trees,
@@ -21,17 +57,74 @@ export const TreeManager = ({
   onDeleteTree,
   onExportTree,
   onImportTree,
+  onOpenTable,
 }: TreeManagerProps) => {
   const [newTreeName, setNewTreeName] = useState('');
   const [editingTreeId, setEditingTreeId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [showInstallHint, setShowInstallHint] = useState(false);
+  const { language, setLanguage } = useFamilyTree();
+  const copy = translations[language];
+  const locale = getLocale(language);
+
+  useEffect(() => {
+    const handleBeforeInstall = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
+
+    const handleAppInstalled = () => {
+      setInstallPrompt(null);
+      setIsStandalone(true);
+    };
+
+    const checkStandalone = () => {
+      const isStandaloneMode = window.matchMedia('(display-mode: standalone)').matches
+        || (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
+      setIsStandalone(isStandaloneMode);
+    };
+
+    checkStandalone();
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('appinstalled', handleAppInstalled);
+    window.addEventListener('resize', checkStandalone);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+      window.removeEventListener('resize', checkStandalone);
+    };
+  }, []);
+
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  const isIos = /iphone|ipad|ipod/i.test(userAgent);
+  const isSafari = /safari/i.test(userAgent) && !/crios|fxios|edgios|android/i.test(userAgent);
+  const canInstall = !isStandalone && (installPrompt || (isIos && isSafari));
+
+  const handleInstallClick = async () => {
+    if (installPrompt) {
+      await installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice.outcome === 'accepted') {
+        setInstallPrompt(null);
+      }
+      return;
+    }
+
+    if (isIos && isSafari) {
+      setShowInstallHint(true);
+    }
+  };
 
   const treeList = Object.values(trees).sort((a, b) =>
     new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
   );
 
   const handleCreateTree = () => {
-    const treeName = newTreeName.trim() || `Stammbaum ${new Date().toLocaleDateString('de-DE')}`;
+    const dateLabel = new Date().toLocaleDateString(locale);
+    const treeName = newTreeName.trim() || copy.defaultTreeName(dateLabel);
     onCreateTree(treeName);
     setNewTreeName('');
   };
@@ -56,7 +149,7 @@ export const TreeManager = ({
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
-    return date.toLocaleDateString('de-DE', {
+    return date.toLocaleDateString(locale, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -68,43 +161,73 @@ export const TreeManager = ({
   return (
     <div className="tree-manager">
       <div className="tree-manager-header">
-        <h1>Familienstammbäume</h1>
-        <p className="tree-manager-subtitle">Verwalten Sie Ihre Familienstammbäume</p>
+        <div className="language-switch">
+          <span className="language-switch-label">{copy.languageLabel}</span>
+          <div className="language-switch-buttons">
+            {languageOptions.map(option => (
+              <button
+                key={option.code}
+                type="button"
+                className={`language-button ${language === option.code ? 'active' : ''}`}
+                onClick={() => setLanguage(option.code)}
+                aria-pressed={language === option.code}
+                aria-label={option.name}
+                title={option.name}
+              >
+                <span className="language-flag">{renderFlag(option.code)}</span>
+                <span className="language-code">{option.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <h1>{copy.managerTitle}</h1>
+        <p className="tree-manager-subtitle">{copy.managerSubtitle}</p>
       </div>
 
       <div className="tree-manager-actions">
         <div className="create-tree-section">
           <input
             type="text"
-            placeholder="Name des neuen Stammbaums"
+            placeholder={copy.newTreePlaceholder}
             value={newTreeName}
             onChange={(e) => setNewTreeName(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleCreateTree()}
             className="tree-name-input"
           />
-          <button onClick={handleCreateTree} className="btn-create-tree">
+          <button type="button" onClick={handleCreateTree} className="btn-create-tree">
             <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+              <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
             </svg>
-            Neuer Stammbaum
+            {copy.newTreeButton}
           </button>
-          <button onClick={onImportTree} className="btn-import-tree">
+          <button type="button" onClick={onImportTree} className="btn-import-tree">
             <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6-.67l-2.59 2.58L9 12.5l5-5 5 5-1.41 1.41L13 11.33V21h-2z"/>
+              <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6-.67l-2.59 2.58L9 12.5l5-5 5 5-1.41 1.41L13 11.33V21h-2z" />
             </svg>
-            Importieren
+            {copy.importButton}
           </button>
+          {canInstall && (
+            <button type="button" onClick={handleInstallClick} className="btn-install-app">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 2v16h10V4H7zm5 3-3 3h2v4h2v-4h2l-3-3z" />
+              </svg>
+              {copy.installApp}
+            </button>
+          )}
         </div>
+        {showInstallHint && isIos && isSafari && (
+          <div className="pwa-install-hint">{copy.installAppHint}</div>
+        )}
       </div>
 
       <div className="tree-list">
         {treeList.length === 0 ? (
           <div className="empty-state">
             <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
             </svg>
-            <h3>Keine Stammbäume vorhanden</h3>
-            <p>Erstellen Sie einen neuen Stammbaum oder importieren Sie einen bestehenden.</p>
+            <h3>{copy.emptyTitle}</h3>
+            <p>{copy.emptyDescription}</p>
           </div>
         ) : (
           treeList.map((tree) => (
@@ -123,67 +246,74 @@ export const TreeManager = ({
                       className="tree-rename-input"
                       autoFocus
                     />
-                    <button onClick={handleSaveRename} className="btn-save-rename">
+                    <button type="button" onClick={handleSaveRename} className="btn-save-rename">
                       <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
                       </svg>
                     </button>
-                    <button onClick={handleCancelRename} className="btn-cancel-rename">
+                    <button type="button" onClick={handleCancelRename} className="btn-cancel-rename">
                       <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                        <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
                       </svg>
                     </button>
                   </div>
                 ) : (
                   <>
                     <h2>{tree.name}</h2>
-                    {activeTreeId === tree.id && <span className="active-badge">Aktiv</span>}
+                    {activeTreeId === tree.id && <span className="active-badge">{copy.activeBadge}</span>}
                   </>
                 )}
               </div>
 
               <div className="tree-card-info">
                 <div className="tree-card-meta">
-                  <span>Erstellt: {formatDate(tree.createdAt)}</span>
-                  <span>Aktualisiert: {formatDate(tree.updatedAt)}</span>
+                  <span>{copy.createdLabel} {formatDate(tree.createdAt)}</span>
+                  <span>{copy.updatedLabel} {formatDate(tree.updatedAt)}</span>
                 </div>
               </div>
 
               <div className="tree-card-actions">
                 <button
+                  type="button"
                   onClick={() => onSelectTree(tree.id)}
                   className="btn-select-tree"
-                  disabled={activeTreeId === tree.id}
                 >
                   <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
+                    <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" />
                   </svg>
-                  {activeTreeId === tree.id ? 'Geöffnet' : 'Öffnen'}
+                  {activeTreeId === tree.id ? copy.viewActive : copy.viewInactive}
                 </button>
-                <button onClick={() => handleStartRename(tree)} className="btn-rename-tree">
+                <button type="button" onClick={() => handleStartRename(tree)} className="btn-rename-tree">
                   <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                    <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
                   </svg>
-                  Umbenennen
+                  {copy.renameButton}
                 </button>
-                <button onClick={() => onExportTree(tree.id)} className="btn-export-tree">
+                <button type="button" onClick={() => onOpenTable(tree.id)} className="btn-table-tree">
                   <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2z"/>
+                    <path d="M3 5c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v14c0 1.1-.9 2-2 2H5c-1.1 0-2-.9-2-2V5zm2 0v3h14V5H5zm0 5v3h6v-3H5zm8 0v3h6v-3h-6zm-8 5v3h6v-3H5zm8 0v3h6v-3h-6z" />
                   </svg>
-                  Exportieren
+                  {copy.tableButton}
+                </button>
+                <button type="button" onClick={() => onExportTree(tree.id)} className="btn-export-tree">
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2z" />
+                  </svg>
+                  {copy.exportButton}
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
-                    if (window.confirm(`Möchten Sie den Stammbaum "${tree.name}" wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.`)) {
+                    if (window.confirm(copy.confirmDeleteTree(tree.name))) {
                       onDeleteTree(tree.id);
                     }
                   }}
                   className="btn-delete-tree"
                 >
                   <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+                    <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" />
                   </svg>
-                  Löschen
+                  {copy.deleteButton}
                 </button>
               </div>
             </div>
