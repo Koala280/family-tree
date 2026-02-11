@@ -10,25 +10,17 @@ import { getDisplayName, getLastNameList } from '../utils/person';
 // Layout configuration
 const PERSON_WIDTH = 100;
 const PERSON_HEIGHT = 140;
-const COUPLE_GAP = 80; // Gap between partners (for marriage symbol)
-const SIBLING_GAP = 40;
-const CHILDLESS_SPOUSE_GAP = COUPLE_GAP + Math.round(SIBLING_GAP * 0.5);
+const COUPLE_GAP = 84; // Gap between partners (for marriage symbol)
+const SIBLING_GAP = 48;
 const GENERATION_GAP = 190;
 const SYMBOL_SIZE = 36;
-const CONNECTOR_CLEARANCE = 10;
-const CONNECTOR_STEP = 20;
-const SPOUSE_LINE_STEP = 16;
-const SPOUSE_MAX_OFFSET = 28;
-const SPOUSE_MIN_OFFSET = 12;
-const SPOUSE_TEXT_CLEARANCE = 30;
 const AVATAR_SIZE = 80;
 const AVATAR_BORDER = 3;
-const AVATAR_RADIUS = AVATAR_SIZE / 2;
 const AVATAR_VISUAL_CENTER = (AVATAR_SIZE + AVATAR_BORDER * 2) / 2;
 const SYMBOL_RADIUS = SYMBOL_SIZE / 2;
 const SYMBOL_AVATAR_GAP = 6;
+const SINGLE_PARENT_SYMBOL_TOP_OFFSET = PERSON_HEIGHT + SYMBOL_AVATAR_GAP;
 const FOCUS_GENERATION = 2;
-const AUTO_MINIMIZE_DEPTH = 3;
 const COLLAPSED_BRANCH_LENGTH = 14;
 const COLLAPSED_BRANCH_RADIUS = 6;
 const BOUNDS_MARGIN = Math.max(40, COLLAPSED_BRANCH_LENGTH + COLLAPSED_BRANCH_RADIUS + 8);
@@ -45,8 +37,6 @@ interface PositionedElement {
   generation: number;
   unionId?: string;
 }
-
-type AncestorSide = 'maternal' | 'paternal';
 
 const getLayoutBounds = (elements: PositionedElement[]) => {
   if (elements.length === 0) {
@@ -103,13 +93,12 @@ export const FamilyTreeView = () => {
   const suppressTapRef = useRef(false);
   const [expandedPersons, setExpandedPersons] = useState<Set<string>>(new Set());
   const [focusedPersonId, setFocusedPersonId] = useState<string | null>(null);
+  const isFullTreeLayout = true;
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [searchFocusId, setSearchFocusId] = useState<string | null>(null);
   const [bottomSearchOpen, setBottomSearchOpen] = useState(false);
-  const [ancestorSideOverrides, _setAncestorSideOverrides] = useState<Map<number, AncestorSide>>(new Map());
-  void _setAncestorSideOverrides; // Reserved for future use
   const [hoveredPersonId, setHoveredPersonId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
@@ -716,35 +705,15 @@ export const FamilyTreeView = () => {
     symbolRefs.current[unionId] = element;
   };
 
-  const getAncestorSide = useCallback((depth: number) => {
-    for (let currentDepth = depth; currentDepth >= 1; currentDepth -= 1) {
-      const side = ancestorSideOverrides.get(currentDepth);
-      if (side) return side;
-    }
-    return null;
-  }, [ancestorSideOverrides]);
-
-  // Build the visible tree structure based on expanded state
+  // Build a deterministic, fully expanded, symmetric top-down tree layout.
   const { visibleElements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons } = useMemo(() => {
-    const elements: PositionedElement[] = [];
-    const positionedPersons = new Map<string, { x: number; y: number; generation: number }>();
-    const positionedUnions = new Map<string, { x: number; y: number; generation: number }>();
     const collapsedDownUnions = new Set<string>();
     const collapsedUpPersons = new Set<string>();
     const collapsedSidePersons = new Set<string>();
-    const enforcedPositions = new Set<string>();
-    const previousVisibleIds = previousVisibleIdsRef.current;
-    const allowAnchoring = !suppressAnchoringRef.current;
-    const hasPreviousVisibility = previousVisibleIds.size > 0;
-    // Person is anchored if:
-    // 1. Anchoring is enabled
-    // 2. No previous visibility tracking (first render)
-    // 3. Person was visible in previous render
-    const isAnchored = (personId: string) =>
-      allowAnchoring && (!hasPreviousVisibility || previousVisibleIds.has(personId));
 
-    if (!focusedPersonId || !familyTree.persons[focusedPersonId]) {
-      return { visibleElements: elements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons };
+    const allPersonIds = Object.keys(familyTree.persons);
+    if (allPersonIds.length === 0) {
+      return { visibleElements: [], collapsedDownUnions, collapsedUpPersons, collapsedSidePersons };
     }
 
     const parseDatePart = (value: string | undefined, fallback: number) => {
@@ -777,1098 +746,564 @@ export const FamilyTreeView = () => {
       return aId.localeCompare(bId);
     };
 
-    // STEP 1: Collect connected persons with auto-minimized branches
-    const personGenerations = new Map<string, number>();
-    const processedPersons = new Map<string, { isDirectLine: boolean }>();
+    const genderRank = (gender: Person['gender']) => {
+      if (gender === 'female') return 0;
+      if (gender === 'male') return 2;
+      return 1;
+    };
 
-    const collectVisibleConnected = (startPersonId: string, startGen: number) => {
-      // isDirectLine: true for focused person and their direct descendants
-      // isAncestor: true for ancestors (parents, grandparents) - their children are siblings, not direct line
-      // isSibling: true for siblings (children of ancestors who are not direct line) - they can show their spouses
-      // isSpouseOfSibling: true for spouses of siblings - they should NOT show their own family tree
-      const queue: { id: string; gen: number; isDirectLine: boolean; isAncestor: boolean; isSibling: boolean; isSpouseOfSibling: boolean }[] = [
-        { id: startPersonId, gen: startGen, isDirectLine: true, isAncestor: false, isSibling: false, isSpouseOfSibling: false }
-      ];
+    const comparePartnerIds = (aId: string, bId: string) => {
+      const personA = familyTree.persons[aId];
+      const personB = familyTree.persons[bId];
+      const rankDiff = genderRank(personA?.gender ?? null) - genderRank(personB?.gender ?? null);
+      if (rankDiff !== 0) return rankDiff;
+      return comparePersonIds(aId, bId);
+    };
 
-      while (queue.length > 0) {
-        const { id, gen, isDirectLine, isAncestor, isSibling, isSpouseOfSibling } = queue.shift()!;
+    // Canonicalize child membership so each person belongs to exactly one parent union.
+    const canonicalParentUnionByPerson = new Map<string, string>();
+    const listedUnionsByChild = new Map<string, string[]>();
 
-        const processedEntry = processedPersons.get(id);
-        if (processedEntry && (!isDirectLine || processedEntry.isDirectLine)) {
-          continue;
-        }
-        processedPersons.set(id, { isDirectLine: processedEntry?.isDirectLine || isDirectLine });
-
-        const person = familyTree.persons[id];
-        if (!person) continue;
-
-        // Set generation (prefer existing if closer to center)
-        if (!personGenerations.has(id)) {
-          personGenerations.set(id, gen);
-        }
-
-        const isExpanded = expandedPersons.has(id);
-        // Only expand branches for direct line persons (focused + descendants), ancestors, siblings, or explicitly expanded
-        const canExpandBranches = isDirectLine || isAncestor || isSibling || isExpanded;
-
-        // Show spouses for direct line persons, ancestors, siblings, or explicitly expanded persons
-        // But NOT for spouses of siblings (their family tree stays hidden)
-        const canShowSpouses = (isDirectLine || isAncestor || isSibling || isExpanded) && !isSpouseOfSibling;
-
-        if (canExpandBranches) {
-          person.unionIds.forEach(unionId => {
-            const union = familyTree.unions[unionId];
-            if (!union) return;
-
-            // Add spouses if allowed
-            if (canShowSpouses) {
-              union.partnerIds.forEach(partnerId => {
-                if (partnerId !== id && familyTree.persons[partnerId]) {
-                  // Spouses of siblings are marked so they don't show their own family tree
-                  const partnerIsSpouseOfSibling = isSibling;
-                  queue.push({ id: partnerId, gen, isDirectLine: false, isAncestor: false, isSibling: false, isSpouseOfSibling: partnerIsSpouseOfSibling });
-                }
-              });
+    Object.values(familyTree.unions)
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .forEach(union => {
+        union.childIds.forEach(childId => {
+          if (!familyTree.persons[childId]) return;
+          const existing = listedUnionsByChild.get(childId);
+          if (existing) {
+            if (!existing.includes(union.id)) {
+              existing.push(union.id);
             }
-
-            if (union.childIds.length === 0) return;
-
-            const childGen = gen + 1;
-            const childDepth = Math.abs(childGen - startGen);
-            const allowChildren = childDepth <= AUTO_MINIMIZE_DEPTH || isExpanded;
-
-            if (allowChildren) {
-              // Children of ancestors are siblings - they are NOT direct line but can show their spouses
-              // Children of direct line persons (focused person or their descendants) ARE direct line
-              const childrenAreDirectLine = isDirectLine && !isAncestor;
-              const childrenAreSiblings = isAncestor && !childrenAreDirectLine;
-              union.childIds.forEach(childId => {
-                if (familyTree.persons[childId]) {
-                  // Check if this child is the focused person (direct line to them)
-                  const isChildOnDirectLine = childrenAreDirectLine || childId === startPersonId;
-                  queue.push({
-                    id: childId,
-                    gen: childGen,
-                    isDirectLine: isChildOnDirectLine,
-                    isAncestor: false,
-                    isSibling: childrenAreSiblings && !isChildOnDirectLine,
-                    isSpouseOfSibling: false
-                  });
-                }
-              });
-            } else {
-              collapsedDownUnions.add(union.id);
-            }
-          });
-        }
-
-        // Add parents (previous generation)
-        if (gen <= startGen && person.parentUnionId) {
-          const parentUnion = familyTree.unions[person.parentUnionId];
-          if (parentUnion) {
-            const parentGen = gen - 1;
-            const parentDepth = Math.abs(parentGen - startGen);
-            const sidePreference = getAncestorSide(parentDepth);
-
-            // Only show ancestors for direct line persons (focused person and their ancestors)
-            // Siblings and spouses should NOT show their ancestors - when they are clicked to expand,
-            // they become the new focused person which makes them isDirectLine=true
-            const shouldShowParents = isDirectLine || id === startPersonId;
-            const allowParents = shouldShowParents && (parentDepth <= AUTO_MINIMIZE_DEPTH || isExpanded || sidePreference !== null);
-
-            if (allowParents) {
-              const availableParents = parentUnion.partnerIds
-                .filter(parentId => familyTree.persons[parentId]);
-
-              let selectedParents = availableParents;
-
-              if (sidePreference) {
-                const preferredGender = sidePreference === 'maternal' ? 'female' : 'male';
-                const fallbackGender = sidePreference === 'maternal' ? 'male' : 'female';
-                const preferred = availableParents.find(parentId => familyTree.persons[parentId]?.gender === preferredGender);
-                const fallback = availableParents.find(parentId => familyTree.persons[parentId]?.gender === fallbackGender);
-                const chosen = preferred ?? fallback ?? availableParents[0];
-                selectedParents = chosen ? [chosen] : [];
-
-                if (availableParents.length > selectedParents.length) {
-                  collapsedUpPersons.add(id);
-                }
-              }
-
-              // Parents are ancestors - their children (siblings) won't be direct line
-              selectedParents.forEach(parentId => {
-                if (familyTree.persons[parentId]) {
-                  queue.push({ id: parentId, gen: parentGen, isDirectLine: true, isAncestor: true, isSibling: false, isSpouseOfSibling: false });
-                }
-              });
-            }
+          } else {
+            listedUnionsByChild.set(childId, [union.id]);
           }
-        }
+        });
+      });
+
+    Object.values(familyTree.persons).forEach(person => {
+      const listed = listedUnionsByChild.get(person.id) ?? [];
+      const preferredUnionId = person.parentUnionId && familyTree.unions[person.parentUnionId]
+        ? person.parentUnionId
+        : undefined;
+
+      let chosenUnionId: string | undefined;
+      if (preferredUnionId && listed.includes(preferredUnionId)) {
+        chosenUnionId = preferredUnionId;
+      } else if (listed.length > 0) {
+        chosenUnionId = listed[0];
+      } else if (preferredUnionId) {
+        chosenUnionId = preferredUnionId;
+      }
+
+      if (chosenUnionId) {
+        canonicalParentUnionByPerson.set(person.id, chosenUnionId);
+      }
+    });
+
+    const effectiveChildIdsByUnion = new Map<string, string[]>();
+    canonicalParentUnionByPerson.forEach((unionId, childId) => {
+      if (!familyTree.unions[unionId]) return;
+      const existing = effectiveChildIdsByUnion.get(unionId);
+      if (existing) {
+        existing.push(childId);
+      } else {
+        effectiveChildIdsByUnion.set(unionId, [childId]);
+      }
+    });
+    effectiveChildIdsByUnion.forEach(childIds => childIds.sort(comparePersonIds));
+
+    const getEffectiveChildIds = (union: Union) =>
+      effectiveChildIdsByUnion.get(union.id) ?? [];
+
+    // Union-find to keep spouses in the same generation band.
+    const ufParent = new Map<string, string>();
+    allPersonIds.forEach(personId => ufParent.set(personId, personId));
+
+    const findGroup = (personId: string): string => {
+      let root = ufParent.get(personId) ?? personId;
+      while (root !== (ufParent.get(root) ?? root)) {
+        root = ufParent.get(root) ?? root;
+      }
+
+      let current = personId;
+      while (current !== root) {
+        const next = ufParent.get(current) ?? current;
+        ufParent.set(current, root);
+        current = next;
+      }
+
+      return root;
+    };
+
+    const unionGroups = (aId: string, bId: string) => {
+      const rootA = findGroup(aId);
+      const rootB = findGroup(bId);
+      if (rootA === rootB) return;
+      if (rootA < rootB) {
+        ufParent.set(rootB, rootA);
+      } else {
+        ufParent.set(rootA, rootB);
       }
     };
 
-    collectVisibleConnected(focusedPersonId, FOCUS_GENERATION);
-
-    // STEP 1.5: Compute collapsedUpPersons AFTER BFS completes
-    // Now that we know all visible persons, check who has hidden parents
-    personGenerations.forEach((_gen, personId) => {
-      const person = familyTree.persons[personId];
-      if (!person || !person.parentUnionId) return;
-
-      const parentUnion = familyTree.unions[person.parentUnionId];
-      if (!parentUnion) return;
-
-      // Check if ANY parent is visible (if so, the parent line is at least partially shown)
-      const anyParentVisible = parentUnion.partnerIds.some(parentId =>
-        personGenerations.has(parentId)
-      );
-
-      // Only mark as collapsed if NO parents are visible at all
-      if (!anyParentVisible) {
-        collapsedUpPersons.add(personId);
-      }
-    });
-
-    // STEP 1.6: Compute collapsedSidePersons - persons with hidden spouses
-    personGenerations.forEach((_gen, personId) => {
-      const person = familyTree.persons[personId];
-      if (!person) return;
-
-      // Check if this person has any spouses that are NOT visible
-      for (const unionId of person.unionIds) {
-        const union = familyTree.unions[unionId];
-        if (!union) continue;
-
-        for (const partnerId of union.partnerIds) {
-          if (partnerId !== personId && !personGenerations.has(partnerId)) {
-            // This partner is not visible - person has hidden spouse
-            collapsedSidePersons.add(personId);
-            return; // No need to check further
-          }
-        }
-      }
-    });
-
-    const isParentVisibleFor = (personId: string) => {
-      const person = familyTree.persons[personId];
-      if (!person?.parentUnionId) return false;
-      const parentUnion = familyTree.unions[person.parentUnionId];
-      if (!parentUnion) return false;
-      return parentUnion.partnerIds.some(parentId => personGenerations.has(parentId));
-    };
-
-    // STEP 2: Group by generation
-    const generationGroups = new Map<number, string[]>();
-    personGenerations.forEach((gen, personId) => {
-      const resolvedGen = gen;
-      if (!generationGroups.has(resolvedGen)) {
-        generationGroups.set(resolvedGen, []);
-      }
-      generationGroups.get(resolvedGen)!.push(personId);
-    });
-
-    // STEP 3: Position each generation - children centered under their parents
-    const sortedGens = Array.from(generationGroups.keys()).sort((a, b) => a - b);
-    const CHILDREN_GAP = SIBLING_GAP * 0.8; // Slightly smaller gap between siblings
-
-    sortedGens.forEach(generation => {
-      const personsInGen = (generationGroups.get(generation) || []).slice().sort(comparePersonIds);
-      const y = generation * GENERATION_GAP;
-
-      // Separate persons into those with positioned parents and those without
-      const childrenWithParents: Map<string, string[]> = new Map(); // unionId -> children
-      const personsWithoutParents: string[] = [];
-
-      personsInGen.forEach(personId => {
-        const person = familyTree.persons[personId];
-        if (!person) return;
-
-        if (person.parentUnionId) {
-          const parentUnion = familyTree.unions[person.parentUnionId];
-          const hasVisibleParent = parentUnion?.partnerIds.some(parentId => personGenerations.has(parentId));
-
-          if (parentUnion && hasVisibleParent) {
-            const children = childrenWithParents.get(person.parentUnionId) || [];
-            children.push(personId);
-            childrenWithParents.set(person.parentUnionId, children);
-            return;
-          }
-        }
-
-        personsWithoutParents.push(personId);
-      });
-
-      const assignedInGen = new Set<string>();
-
-      // Position children centered under their parent union (include spouses as a family unit)
-      childrenWithParents.forEach((children, parentUnionId) => {
-        const parentUnion = familyTree.unions[parentUnionId];
-        if (!parentUnion) return;
-
-          const parentPositions = parentUnion.partnerIds
-            .map(pid => {
-              const parent = familyTree.persons[pid];
-              if (!parent) return null;
-              if (parent.position && isAnchored(pid) && !isParentVisibleFor(pid)) {
-                const parentGen = personGenerations.get(pid) ?? generation - 1;
-                return {
-                  x: parent.position.x,
-                  y: parentGen * GENERATION_GAP,
-                  generation: parentGen
-                };
-              }
-              return positionedPersons.get(pid) ?? null;
-            })
-            .filter(Boolean) as { x: number; y: number; generation: number }[];
-
-        if (parentPositions.length === 0) {
-          children.forEach(childId => {
-            if (!personsWithoutParents.includes(childId)) {
-              personsWithoutParents.push(childId);
-            }
-          });
-          return;
-        }
-
-        let parentCenterX = parentPositions[0].x;
-        if (parentPositions.length >= 2) {
-          const minX = Math.min(...parentPositions.map(p => p.x));
-          const maxX = Math.max(...parentPositions.map(p => p.x));
-          parentCenterX = (minX + maxX) / 2;
-        }
-
-        const childrenSet = new Set(children);
-        const orderedChildren = parentUnion.childIds
-          .filter(childId => childrenSet.has(childId))
-          .sort(comparePersonIds);
-
-        type ChildUnit = {
-          childId: string;
-          members: string[];
-          gaps: number[];
-          partners: string[];
-          width: number;
-          childOffset: number;
-          memberOffsets: Map<string, number>;
-        };
-        const childUnits: ChildUnit[] = [];
-
-        orderedChildren.forEach(childId => {
-          if (assignedInGen.has(childId) || positionedPersons.has(childId)) {
-            assignedInGen.add(childId);
-            return;
-          }
-
-          const child = familyTree.persons[childId];
-          if (!child) return;
-
-          const partnerMeta = new Map<string, { hasChildren: boolean; order: number; side: 'left' | 'right' }>();
-
-          child.unionIds.forEach((unionId, unionIndex) => {
-            const union = familyTree.unions[unionId];
-            if (!union) return;
-
-            union.partnerIds.forEach(partnerId => {
-              if (partnerId === childId) return;
-              if (assignedInGen.has(partnerId)) return;
-              if (positionedPersons.has(partnerId)) return; // Already positioned elsewhere
-
-              const partner = familyTree.persons[partnerId];
-              if (!partner) return;
-
-              // Check if partner is visible and should be in same generation as child
-              const partnerNaturalGen = personGenerations.get(partnerId);
-              const childNaturalGen = personGenerations.get(childId);
-              // Partner must be visible and have same natural generation as the child
-              if (partnerNaturalGen === undefined) return;
-              if (partnerNaturalGen !== childNaturalGen) return;
-              // Partners with visible parents are positioned by their own parents.
-              if (isParentVisibleFor(partnerId)) return;
-
-              const hasChildren = union.childIds.length > 0;
-              const side = partner.gender === 'female' ? 'left' : 'right';
-              const existing = partnerMeta.get(partnerId);
-
-              if (!existing || unionIndex < existing.order) {
-                partnerMeta.set(partnerId, { hasChildren, order: unionIndex, side });
-              } else if (hasChildren && !existing.hasChildren) {
-                partnerMeta.set(partnerId, { ...existing, hasChildren });
-              }
-            });
-          });
-
-          const partners = Array.from(partnerMeta.keys());
-          assignedInGen.add(childId);
-          partners.forEach(partnerId => assignedInGen.add(partnerId));
-
-          const leftPartners = partners
-            .map(id => ({ id, ...partnerMeta.get(id)! }))
-            .filter(partner => partner.side === 'left')
-            .sort((a, b) => {
-              if (a.hasChildren !== b.hasChildren) return Number(a.hasChildren) - Number(b.hasChildren);
-              return a.order - b.order;
-            });
-
-          const rightPartners = partners
-            .map(id => ({ id, ...partnerMeta.get(id)! }))
-            .filter(partner => partner.side === 'right')
-            .sort((a, b) => {
-              if (a.hasChildren !== b.hasChildren) return Number(b.hasChildren) - Number(a.hasChildren);
-              return a.order - b.order;
-            });
-
-          const members = [
-            ...leftPartners.map(partner => partner.id),
-            childId,
-            ...rightPartners.map(partner => partner.id)
-          ];
-
-          const gaps: number[] = [];
-          for (let i = 0; i < members.length - 1; i += 1) {
-            const leftId = members[i];
-            const rightId = members[i + 1];
-
-            let gap = COUPLE_GAP;
-            if (leftId === childId || rightId === childId) {
-              const partnerId = leftId === childId ? rightId : leftId;
-              const partnerInfo = partnerMeta.get(partnerId);
-              gap = partnerInfo?.hasChildren ? COUPLE_GAP : CHILDLESS_SPOUSE_GAP;
-            }
-            gaps.push(gap);
-          }
-
-            const unitWidth = members.length * PERSON_WIDTH + gaps.reduce((sum, gap) => sum + gap, 0);
-            const memberOffsets = new Map<string, number>();
-            let offset = PERSON_WIDTH / 2;
-            members.forEach((memberId, index) => {
-              memberOffsets.set(memberId, offset);
-              offset += PERSON_WIDTH;
-              if (index < gaps.length) {
-                offset += gaps[index];
-              }
-            });
-            const childOffset = memberOffsets.get(childId) ?? PERSON_WIDTH / 2;
-
-            childUnits.push({
-              childId,
-              members,
-              gaps,
-              partners,
-              width: unitWidth,
-              childOffset,
-              memberOffsets
-            });
-        });
-
-        if (childUnits.length === 0) return;
-
-        const unitLayouts = childUnits.map(unit => ({
-          unit,
-          width: unit.width,
-          childOffset: unit.childOffset,
-          baselineLeft: 0,
-          left: 0
-        }));
-
-        let totalWidth = childUnits.reduce((sum, unit) => sum + unit.width, 0);
-        if (childUnits.length > 1) {
-          totalWidth += (childUnits.length - 1) * CHILDREN_GAP;
-        }
-
-        let baselineLeft = parentCenterX - totalWidth / 2;
-        unitLayouts.forEach(layout => {
-          layout.baselineLeft = baselineLeft;
-          baselineLeft += layout.width + CHILDREN_GAP;
-        });
-
-        let minLeft = Number.NEGATIVE_INFINITY;
-        unitLayouts.forEach(layout => {
-          const left = Math.max(layout.baselineLeft, minLeft);
-          layout.left = left;
-          minLeft = left + layout.width + CHILDREN_GAP;
-        });
-
-        unitLayouts.forEach(layout => {
-          const { unit } = layout;
-          let cursor = layout.left;
-
-          unit.members.forEach((memberId, memberIdx) => {
-              const x = cursor + PERSON_WIDTH / 2;
-              positionedPersons.set(memberId, { x, y, generation });
-              elements.push({ type: 'person', id: memberId, x, y, generation });
-              if (!isAnchored(memberId) && !isParentVisibleFor(memberId)) {
-                enforcedPositions.add(memberId);
-              }
-
-            cursor += PERSON_WIDTH;
-            if (memberIdx < unit.gaps.length) {
-              cursor += unit.gaps[memberIdx];
-            }
-          });
-
-          const childPos = positionedPersons.get(unit.childId);
-          if (childPos) {
-            unit.partners.forEach(partnerId => {
-              const partnerPos = positionedPersons.get(partnerId);
-              if (!partnerPos) return;
-
-              const child = familyTree.persons[unit.childId];
-              const sharedUnion = child?.unionIds
-                .map(uid => familyTree.unions[uid])
-                .find(u => u && u.partnerIds.includes(partnerId));
-
-              if (sharedUnion && !positionedUnions.has(sharedUnion.id)) {
-                const symbolX = (childPos.x + partnerPos.x) / 2;
-                const symbolY = y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
-
-                positionedUnions.set(sharedUnion.id, { x: symbolX, y: symbolY, generation });
-                elements.push({
-                  type: 'union-symbol',
-                  id: sharedUnion.id,
-                  x: symbolX,
-                  y: symbolY,
-                  generation,
-                  unionId: sharedUnion.id
-                });
-              }
-            });
-          }
-        });
-
-      });
-
-      // Now handle persons without positioned parents (or who are the root generation)
-      const remainingWithoutParents = personsWithoutParents
-        .filter(personId => !positionedPersons.has(personId))
-        .sort(comparePersonIds);
-      if (remainingWithoutParents.length > 0) {
-        // Group by union relationships
-        const personIndexById = new Map<string, number>();
-        remainingWithoutParents.forEach((personId, index) => {
-          personIndexById.set(personId, index);
-        });
-
-        const positionedInGen = new Set<string>();
-        const allGroups: string[][] = [];
-
-        // Build visual groups - combine all partners of persons with multiple unions
-        const multiUnionGroups = new Map<string, { centralPerson: string; allPartners: Set<string>; firstIndex: number }>();
-        const processedInMultiUnion = new Set<string>();
-
-        remainingWithoutParents.forEach(personId => {
-          const person = familyTree.persons[personId];
-          if (!person || person.unionIds.length < 2) return;
-
-          const allPartners = new Set<string>();
-          allPartners.add(personId);
-
-          person.unionIds.forEach(unionId => {
-            const union = familyTree.unions[unionId];
-            if (!union) return;
-
-            union.partnerIds.forEach(partnerId => {
-              const partnerGen = personGenerations.get(partnerId);
-              if (partnerGen === generation && remainingWithoutParents.includes(partnerId)) {
-                allPartners.add(partnerId);
-              }
-            });
-          });
-
-          if (allPartners.size > 1) {
-            const firstIdx = Math.min(...Array.from(allPartners).map(pid => personIndexById.get(pid) ?? Infinity));
-            multiUnionGroups.set(personId, {
-              centralPerson: personId,
-              allPartners,
-              firstIndex: firstIdx
-            });
-            allPartners.forEach(p => processedInMultiUnion.add(p));
-          }
-        });
-
-        // Build union groups for single unions
-        const unionGroups = new Map<string, { unionId: string; members: Set<string>; firstIndex: number }>();
-
-        remainingWithoutParents.forEach(personId => {
-          if (processedInMultiUnion.has(personId)) return;
-
-          const person = familyTree.persons[personId];
-          if (!person) return;
-
-          person.unionIds.forEach(unionId => {
-            const union = familyTree.unions[unionId];
-            if (!union) return;
-
-            const partnersInGen = union.partnerIds.filter(partnerId =>
-              !processedInMultiUnion.has(partnerId) &&
-              remainingWithoutParents.includes(partnerId)
-            );
-
-            if (partnersInGen.length > 0) {
-              const groupKey = `union-${unionId}`;
-              if (!unionGroups.has(groupKey)) {
-                const firstIdx = Math.min(...partnersInGen.map(pid => personIndexById.get(pid) ?? Infinity));
-                unionGroups.set(groupKey, {
-                  unionId,
-                  members: new Set(partnersInGen),
-                  firstIndex: firstIdx
-                });
-              }
-            }
-          });
-        });
-
-        // Process multi-union groups
-        const sortedMultiUnionGroups = Array.from(multiUnionGroups.values())
-          .sort((a, b) => a.firstIndex - b.firstIndex);
-
-        sortedMultiUnionGroups.forEach(multiGroup => {
-          const centralId = multiGroup.centralPerson;
-          if (positionedInGen.has(centralId)) return;
-
-          const central = familyTree.persons[centralId];
-          if (!central) return;
-
-          const partners = Array.from(multiGroup.allPartners)
-            .filter(personId => personId !== centralId && !positionedInGen.has(personId));
-
-          if (partners.length === 0) {
-            positionedInGen.add(centralId);
-            allGroups.push([centralId]);
-            return;
-          }
-
-          const partnerMeta = new Map<string, { hasChildren: boolean; order: number; side: 'left' | 'right' }>();
-          const partnersSet = new Set(partners);
-
-          central.unionIds.forEach((unionId, unionIndex) => {
-            const union = familyTree.unions[unionId];
-            if (!union) return;
-
-            const partnerId = union.partnerIds.find(id => id !== centralId);
-            if (!partnerId || !partnersSet.has(partnerId)) return;
-
-            const partner = familyTree.persons[partnerId];
-            if (!partner) return;
-
-            const hasChildren = union.childIds.length > 0;
-            const side = partner.gender === 'female' ? 'left' : 'right';
-            const existing = partnerMeta.get(partnerId);
-
-            if (!existing || unionIndex < existing.order || (hasChildren && !existing.hasChildren)) {
-              partnerMeta.set(partnerId, { hasChildren, order: unionIndex, side });
-            }
-          });
-
-          partners.forEach(partnerId => {
-            if (partnerMeta.has(partnerId)) return;
-            const partner = familyTree.persons[partnerId];
-            const side = partner?.gender === 'female' ? 'left' : 'right';
-            partnerMeta.set(partnerId, { hasChildren: false, order: Number.MAX_SAFE_INTEGER, side });
-          });
-
-          const leftPartners = partners
-            .map(id => ({ id, ...partnerMeta.get(id)! }))
-            .filter(partner => partner.side === 'left')
-            .sort((a, b) => {
-              if (a.hasChildren !== b.hasChildren) return Number(a.hasChildren) - Number(b.hasChildren);
-              return a.order - b.order;
-            });
-
-          const rightPartners = partners
-            .map(id => ({ id, ...partnerMeta.get(id)! }))
-            .filter(partner => partner.side === 'right')
-            .sort((a, b) => {
-              if (a.hasChildren !== b.hasChildren) return Number(b.hasChildren) - Number(a.hasChildren);
-              return a.order - b.order;
-            });
-
-          const members = [
-            ...leftPartners.map(partner => partner.id),
-            centralId,
-            ...rightPartners.map(partner => partner.id)
-          ];
-
-          members.forEach(id => positionedInGen.add(id));
-          allGroups.push(members);
-        });
-
-        // Process single union groups
-        const sortedUnionGroups = Array.from(unionGroups.values())
-          .sort((a, b) => a.firstIndex - b.firstIndex);
-
-        sortedUnionGroups.forEach(unionGroup => {
-          const members = Array.from(unionGroup.members)
-            .filter(personId => !positionedInGen.has(personId));
-
-          if (members.length === 0) return;
-
-          // Females on left, males on right
-          members.sort((a, b) => {
-            const personA = familyTree.persons[a];
-            const personB = familyTree.persons[b];
-
-            if (personA?.gender === 'female' && personB?.gender !== 'female') return -1;
-            if (personB?.gender === 'female' && personA?.gender !== 'female') return 1;
-            return 0;
-          });
-
-          members.forEach(id => positionedInGen.add(id));
-          allGroups.push(members);
-        });
-
-        // Add remaining unpositioned persons
-        remainingWithoutParents.forEach(personId => {
-          if (positionedInGen.has(personId)) return;
-          positionedInGen.add(personId);
-          allGroups.push([personId]);
-        });
-
-        // Calculate total width and position groups (anchor existing persons, place new ones)
-        const GROUP_GAP = SIBLING_GAP * 2;
-        const groupLayouts = allGroups.map(group => {
-          const gaps = group.slice(0, -1).map((leftId, index) => {
-            const rightId = group[index + 1];
-            const leftPerson = familyTree.persons[leftId];
-            if (!leftPerson) return COUPLE_GAP;
-
-            const sharedUnion = leftPerson.unionIds
-              .map(uid => familyTree.unions[uid])
-              .find(u => u && u.partnerIds.includes(leftId) && u.partnerIds.includes(rightId));
-
-            if (!sharedUnion) return SIBLING_GAP;
-            return sharedUnion.childIds.length > 0 ? COUPLE_GAP : CHILDLESS_SPOUSE_GAP;
-          });
-          const width = group.length * PERSON_WIDTH + gaps.reduce((sum, gap) => sum + gap, 0);
-          const memberOffsets = new Map<string, number>();
-          let offset = PERSON_WIDTH / 2;
-          group.forEach((memberId, index) => {
-            memberOffsets.set(memberId, offset);
-            offset += PERSON_WIDTH;
-            if (index < gaps.length) {
-              offset += gaps[index];
-            }
-          });
-          return { group, gaps, width, memberOffsets, baselineLeft: 0, left: 0 };
-        });
-
-        let totalWidth = 0;
-        groupLayouts.forEach((layout, idx) => {
-          totalWidth += layout.width;
-          if (idx < groupLayouts.length - 1) {
-            totalWidth += GROUP_GAP;
-          }
-        });
-
-        let baselineLeft = -totalWidth / 2;
-        groupLayouts.forEach(layout => {
-          layout.baselineLeft = baselineLeft;
-          baselineLeft += layout.width + GROUP_GAP;
-        });
-
-        let minLeft = Number.NEGATIVE_INFINITY;
-        groupLayouts.forEach(layout => {
-          const anchorMemberId = layout.group.find(memberId => {
-            return isAnchored(memberId) && personGenerations.get(memberId) === generation;
-          });
-          const anchorPosition = anchorMemberId ? familyTree.persons[anchorMemberId]?.position : undefined;
-          const anchorOffset = anchorMemberId ? layout.memberOffsets.get(anchorMemberId) : undefined;
-          const canAnchor = Boolean(anchorPosition && anchorOffset !== undefined);
-          const desiredLeft = canAnchor
-            ? anchorPosition!.x - (anchorOffset ?? PERSON_WIDTH / 2)
-            : layout.baselineLeft;
-          const left = canAnchor ? desiredLeft : Math.max(desiredLeft, minLeft);
-          layout.left = left;
-          minLeft = left + layout.width + GROUP_GAP;
-        });
-
-        groupLayouts.forEach(layout => {
-          let cursor = layout.left;
-          layout.group.forEach((personId, idx) => {
-            const x = cursor + PERSON_WIDTH / 2;
-
-            positionedPersons.set(personId, { x, y, generation });
-            elements.push({ type: 'person', id: personId, x, y, generation });
-            if (!isAnchored(personId) && !isParentVisibleFor(personId)) {
-              enforcedPositions.add(personId);
-            }
-
-            cursor += PERSON_WIDTH;
-
-            if (idx < layout.group.length - 1) {
-              const nextPersonId = layout.group[idx + 1];
-              const person = familyTree.persons[personId];
-              const gap = layout.gaps[idx] ?? COUPLE_GAP;
-
-              const sharedUnion = person?.unionIds
-                .map(uid => familyTree.unions[uid])
-                .find(u => u && u.partnerIds.includes(personId) && u.partnerIds.includes(nextPersonId));
-
-              if (sharedUnion && !positionedUnions.has(sharedUnion.id)) {
-                const symbolX = cursor + gap / 2;
-                const symbolY = y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
-
-                positionedUnions.set(sharedUnion.id, { x: symbolX, y: symbolY, generation });
-                elements.push({
-                  type: 'union-symbol',
-                  id: sharedUnion.id,
-                  x: symbolX,
-                  y: symbolY,
-                  generation,
-                  unionId: sharedUnion.id
-                });
-              }
-
-              cursor += gap;
-            }
-          });
-        });
-      }
-
-    });
-
-    // STEP 4: Add union symbols for parent-child relationships (unions not yet added)
     Object.values(familyTree.unions).forEach(union => {
-      if (positionedUnions.has(union.id)) return;
-
-      const visibleChildren = union.childIds.filter(id => positionedPersons.has(id));
-
-      // Check if partners are positioned
-      const posPartners = union.partnerIds
-        .filter(id => positionedPersons.has(id))
-        .map(id => ({ id, pos: positionedPersons.get(id)! }));
-
-      if (posPartners.length === 0) return;
-      if (posPartners.length === 1 && visibleChildren.length === 0) return;
-
-      if (posPartners.length >= 1) {
-        const [p1, p2] = posPartners;
-        const symbolX = p2 ? (p1.pos.x + p2.pos.x) / 2 : p1.pos.x;
-        const symbolY = p1.pos.y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
-
-        positionedUnions.set(union.id, { x: symbolX, y: symbolY, generation: p1.pos.generation });
-        elements.push({
-          type: 'union-symbol',
-          id: union.id,
-          x: symbolX,
-          y: symbolY,
-          generation: p1.pos.generation,
-          unionId: union.id
-        });
-      }
+      const partners = union.partnerIds.filter(personId => familyTree.persons[personId]);
+      if (partners.length < 2) return;
+      const anchor = partners[0];
+      partners.slice(1).forEach(partnerId => unionGroups(anchor, partnerId));
     });
 
-    // Build spouse groups - persons connected by marriage should move together
-    const buildSpouseGroups = (persons: PositionedElement[]): PositionedElement[][] => {
-      const personIdSet = new Set(persons.map(p => p.id));
-      const visited = new Set<string>();
-      const groups: PositionedElement[][] = [];
+    const allGroupIds = new Set<string>();
+    allPersonIds.forEach(personId => {
+      allGroupIds.add(findGroup(personId));
+    });
 
-      const findConnectedSpouses = (startPerson: PositionedElement): PositionedElement[] => {
-        const group: PositionedElement[] = [];
-        const queue = [startPerson];
+    const childrenByGroup = new Map<string, Set<string>>();
+    const indegreeByGroup = new Map<string, number>();
+    allGroupIds.forEach(groupId => {
+      childrenByGroup.set(groupId, new Set<string>());
+      indegreeByGroup.set(groupId, 0);
+    });
 
-        while (queue.length > 0) {
-          const person = queue.shift()!;
-          if (visited.has(person.id)) continue;
-          visited.add(person.id);
-          group.push(person);
-
-          // Find all spouses through unions
-          const personData = familyTree.persons[person.id];
-          if (personData) {
-            personData.unionIds.forEach(unionId => {
-              const union = familyTree.unions[unionId];
-              if (!union) return;
-              union.partnerIds.forEach(partnerId => {
-                if (partnerId !== person.id && personIdSet.has(partnerId) && !visited.has(partnerId)) {
-                  const partnerElement = persons.find(p => p.id === partnerId);
-                  if (partnerElement) {
-                    queue.push(partnerElement);
-                  }
-                }
-              });
-            });
-          }
-        }
-
-        return group;
-      };
-
-      persons.forEach(person => {
-        if (!visited.has(person.id)) {
-          const group = findConnectedSpouses(person);
-          if (group.length > 0) {
-            groups.push(group);
-          }
-        }
-      });
-
-      return groups;
+    const addGroupEdge = (fromGroupId: string, toGroupId: string) => {
+      if (fromGroupId === toGroupId) return;
+      const children = childrenByGroup.get(fromGroupId);
+      if (!children || children.has(toGroupId)) return;
+      children.add(toGroupId);
+      indegreeByGroup.set(toGroupId, (indegreeByGroup.get(toGroupId) ?? 0) + 1);
     };
 
-    // STEP 5: Override calculated X positions with saved positions to keep layout stable
-    // Note: Only restore X position, not generation - generation is relative to focused person
-    // Exception: The focused person should always stay at X=0 for proper centering
-    if (allowAnchoring) {
-      const personElements = elements.filter(element => element.type === 'person') as PositionedElement[];
-        const shouldAnchorPerson = (element: PositionedElement) => {
-          if (element.id === focusedPersonId) return false;
-          const person = familyTree.persons[element.id];
-          if (!person?.position) return false;
-          if (isParentVisibleFor(element.id)) return false;
-          if (enforcedPositions.has(element.id)) return false;
-          if (!isAnchored(element.id)) return false;
-          return true;
-        };
+    Object.values(familyTree.unions).forEach(union => {
+      const parentGroups = Array.from(new Set(
+        union.partnerIds
+          .filter(personId => familyTree.persons[personId])
+          .map(partnerId => findGroup(partnerId))
+      ));
+      if (parentGroups.length === 0) return;
 
-      const anchoredByGroup = new Set<string>();
-      const spouseGroups = buildSpouseGroups(personElements);
-
-      spouseGroups.forEach(group => {
-        const anchorableMembers = group.filter(shouldAnchorPerson);
-        if (anchorableMembers.length === 0 || anchorableMembers.length !== group.length) return;
-
-        const deltas = anchorableMembers.map(member => {
-          const person = familyTree.persons[member.id];
-          return (person?.position?.x ?? member.x) - member.x;
-        });
-
-        if (deltas.length === 0) return;
-
-        deltas.sort((a, b) => a - b);
-        const delta = deltas[Math.floor(deltas.length / 2)];
-
-        group.forEach(member => {
-          member.x += delta;
-          const existingPos = positionedPersons.get(member.id);
-          if (existingPos) {
-            existingPos.x = member.x;
-          }
-          anchoredByGroup.add(member.id);
-        });
+      const children = getEffectiveChildIds(union).filter(childId => familyTree.persons[childId]);
+      children.forEach(childId => {
+        const childGroupId = findGroup(childId);
+        parentGroups.forEach(parentGroupId => addGroupEdge(parentGroupId, childGroupId));
       });
+    });
 
-      personElements.forEach(element => {
-        if (!shouldAnchorPerson(element)) return;
-        if (anchoredByGroup.has(element.id)) return;
-        const person = familyTree.persons[element.id];
-        if (!person?.position) return;
-        element.x = person.position.x;
+    const generationByGroup = new Map<string, number>();
+    allGroupIds.forEach(groupId => generationByGroup.set(groupId, 0));
 
-        const existingPos = positionedPersons.get(element.id);
-        if (existingPos) {
-          existingPos.x = element.x;
+    const queue = Array.from(allGroupIds)
+      .filter(groupId => (indegreeByGroup.get(groupId) ?? 0) === 0)
+      .sort((a, b) => a.localeCompare(b));
+
+    let processedGroups = 0;
+    while (queue.length > 0) {
+      const groupId = queue.shift()!;
+      processedGroups += 1;
+      const groupGeneration = generationByGroup.get(groupId) ?? 0;
+
+      (childrenByGroup.get(groupId) ?? new Set<string>()).forEach(childGroupId => {
+        const currentChildGeneration = generationByGroup.get(childGroupId) ?? 0;
+        if (currentChildGeneration < groupGeneration + 1) {
+          generationByGroup.set(childGroupId, groupGeneration + 1);
+        }
+
+        const nextIndegree = (indegreeByGroup.get(childGroupId) ?? 0) - 1;
+        indegreeByGroup.set(childGroupId, nextIndegree);
+        if (nextIndegree === 0) {
+          queue.push(childGroupId);
+          queue.sort((a, b) => a.localeCompare(b));
         }
       });
     }
 
-    // STEP 5.5: Collision detection - shift enforced groups to avoid overlapping with anchored positions
-    const COLLISION_MARGIN = 10;
-    const MIN_PERSON_DISTANCE = PERSON_WIDTH + COLLISION_MARGIN;
+    // Fallback relaxation if constraints contain a cycle.
+    if (processedGroups < allGroupIds.size) {
+      const edges: Array<{ from: string; to: string }> = [];
+      childrenByGroup.forEach((children, fromGroupId) => {
+        children.forEach(toGroupId => edges.push({ from: fromGroupId, to: toGroupId }));
+      });
 
-    // Group persons by generation
-    const personsByGeneration = new Map<number, PositionedElement[]>();
-    elements.forEach(element => {
-      if (element.type !== 'person') return;
-      const gen = element.generation;
-      if (!personsByGeneration.has(gen)) {
-        personsByGeneration.set(gen, []);
+      for (let pass = 0; pass < allGroupIds.size; pass += 1) {
+        let changed = false;
+        edges.forEach(({ from, to }) => {
+          const fromGeneration = generationByGroup.get(from) ?? 0;
+          const toGeneration = generationByGroup.get(to) ?? 0;
+          if (toGeneration < fromGeneration + 1) {
+            generationByGroup.set(to, fromGeneration + 1);
+            changed = true;
+          }
+        });
+        if (!changed) break;
       }
-      personsByGeneration.get(gen)!.push(element);
+    }
+
+    // Tighten generations so parents stay as close as possible above children.
+    // This prevents sparse gaps when one spouse subtree is much deeper than the other.
+    const groupIdList = Array.from(allGroupIds);
+    for (let pass = 0; pass < groupIdList.length; pass += 1) {
+      let changed = false;
+      groupIdList.forEach(groupId => {
+        const childGroups = childrenByGroup.get(groupId);
+        if (!childGroups || childGroups.size === 0) return;
+
+        let maxAllowedGeneration = Number.POSITIVE_INFINITY;
+        childGroups.forEach(childGroupId => {
+          const childGeneration = generationByGroup.get(childGroupId) ?? 0;
+          maxAllowedGeneration = Math.min(maxAllowedGeneration, childGeneration - 1);
+        });
+        if (!Number.isFinite(maxAllowedGeneration)) return;
+
+        const currentGeneration = generationByGroup.get(groupId) ?? 0;
+        if (currentGeneration < maxAllowedGeneration) {
+          generationByGroup.set(groupId, maxAllowedGeneration);
+          changed = true;
+        }
+      });
+      if (!changed) break;
+    }
+
+    const minGeneration = Math.min(...Array.from(generationByGroup.values()));
+    if (Number.isFinite(minGeneration) && minGeneration !== 0) {
+      generationByGroup.forEach((generation, groupId) => {
+        generationByGroup.set(groupId, generation - minGeneration);
+      });
+    }
+
+    const generationByPerson = new Map<string, number>();
+    allPersonIds.forEach(personId => {
+      generationByPerson.set(personId, generationByGroup.get(findGroup(personId)) ?? 0);
     });
 
-    const updateMemberX = (member: PositionedElement, x: number) => {
-      member.x = x;
-      const pos = positionedPersons.get(member.id);
-      if (pos) pos.x = x;
-    };
+    const generations = Array.from(new Set(Array.from(generationByPerson.values()))).sort((a, b) => a - b);
+    const personsByGeneration = new Map<number, string[]>();
+    generations.forEach(generation => personsByGeneration.set(generation, []));
+    allPersonIds.forEach(personId => {
+      const generation = generationByPerson.get(personId) ?? 0;
+      const arr = personsByGeneration.get(generation);
+      if (arr) {
+        arr.push(personId);
+      } else {
+        personsByGeneration.set(generation, [personId]);
+      }
+    });
+    personsByGeneration.forEach(arr => arr.sort(comparePersonIds));
 
-    const shiftGroup = (group: PositionedElement[], delta: number) => {
-      if (Math.abs(delta) <= 0.5) return;
-      group.forEach(member => {
-        updateMemberX(member, member.x + delta);
+    const sharesUnion = (leftPersonId: string, rightPersonId: string) => {
+      const left = familyTree.persons[leftPersonId];
+      if (!left) return false;
+      return left.unionIds.some(unionId => {
+        const union = familyTree.unions[unionId];
+        return Boolean(union && union.partnerIds.includes(rightPersonId));
       });
     };
 
-    // For each generation, resolve collisions
-    personsByGeneration.forEach((personsInGen) => {
-      const anchoredPersons = personsInGen.filter(p => !enforcedPositions.has(p.id));
-      const enforcedPersonsInGen = personsInGen.filter(p => enforcedPositions.has(p.id));
+    const positionedPersons = new Map<string, { x: number; y: number; generation: number }>();
 
-      if (anchoredPersons.length === 0 || enforcedPersonsInGen.length === 0) return;
+    type GenerationUnit = {
+      members: string[];
+      gaps: number[];
+      width: number;
+      targetX: number;
+      left: number;
+      sortKey: string;
+    };
 
-      // Build groups of connected enforced persons (spouses stay together)
-      const enforcedGroups = buildSpouseGroups(enforcedPersonsInGen);
+    const getLayoutScore = (order: string[], edges: Array<{ a: string; b: string }>) => {
+      const indexById = new Map<string, number>();
+      order.forEach((personId, index) => indexById.set(personId, index));
+      return edges.reduce((sum, edge) => {
+        const aIndex = indexById.get(edge.a);
+        const bIndex = indexById.get(edge.b);
+        if (aIndex === undefined || bIndex === undefined) return sum;
+        return sum + Math.abs(aIndex - bIndex);
+      }, 0);
+    };
 
-      // For each group, check collisions with anchored persons and shift the whole group
-      enforcedGroups.forEach(group => {
-        let iterations = 0;
-        const maxIterations = 50;
+    const optimizeMemberOrder = (
+      baseOrder: string[],
+      edges: Array<{ a: string; b: string }>,
+      canSwapAdjacent?: (leftId: string, rightId: string) => boolean
+    ) => {
+      if (baseOrder.length < 3 || edges.length === 0) return baseOrder;
+      const order = baseOrder.slice();
+      let bestScore = getLayoutScore(order, edges);
 
-        while (iterations < maxIterations) {
-          iterations++;
-          let maxOverlap = 0;
-          let overlapDirection = 0;
-
-          // Check each group member for collisions with anchored persons
-          for (const groupMember of group) {
-            for (const anchoredPerson of anchoredPersons) {
-              const distance = Math.abs(groupMember.x - anchoredPerson.x);
-              if (distance < MIN_PERSON_DISTANCE) {
-                const overlap = MIN_PERSON_DISTANCE - distance;
-                if (overlap > maxOverlap) {
-                  maxOverlap = overlap;
-                  // Shift away from collision
-                  overlapDirection = groupMember.x < anchoredPerson.x ? -1 : 1;
-                }
-              }
-            }
+      for (let pass = 0; pass < 24; pass += 1) {
+        let improved = false;
+        for (let index = 0; index < order.length - 1; index += 1) {
+          const leftId = order[index];
+          const rightId = order[index + 1];
+          if (canSwapAdjacent && !canSwapAdjacent(leftId, rightId)) {
+            continue;
           }
 
-          if (maxOverlap <= 0) break;
+          const swapped = order.slice();
+          const temp = swapped[index];
+          swapped[index] = swapped[index + 1];
+          swapped[index + 1] = temp;
+          const score = getLayoutScore(swapped, edges);
+          if (score < bestScore) {
+            bestScore = score;
+            order[index] = swapped[index];
+            order[index + 1] = swapped[index + 1];
+            improved = true;
+          }
+        }
+        if (!improved) break;
+      }
 
-          // Shift the entire group
-          const shiftAmount = maxOverlap + 1;
-          group.forEach(member => {
-            member.x += shiftAmount * overlapDirection;
-            const pos = positionedPersons.get(member.id);
-            if (pos) pos.x = member.x;
+      return order;
+    };
+
+    generations.forEach(generation => {
+      const personsInGeneration = (personsByGeneration.get(generation) ?? []).slice().sort(comparePersonIds);
+      if (personsInGeneration.length === 0) return;
+
+      const personSet = new Set(personsInGeneration);
+      const spouseGraph = new Map<string, Set<string>>();
+      personsInGeneration.forEach(personId => spouseGraph.set(personId, new Set<string>()));
+      const parentTargetByPerson = new Map<string, number>();
+      const ANCHOR_EPSILON = 0.5;
+
+      personsInGeneration.forEach(personId => {
+        const parentUnionId = canonicalParentUnionByPerson.get(personId);
+        if (!parentUnionId) return;
+        const parentUnion = familyTree.unions[parentUnionId];
+        if (!parentUnion) return;
+
+        const parentXs = parentUnion.partnerIds
+          .map(parentId => positionedPersons.get(parentId)?.x)
+          .filter((x): x is number => x !== undefined);
+        if (parentXs.length === 0) return;
+
+        const targetX = parentXs.reduce((sum, x) => sum + x, 0) / parentXs.length;
+        parentTargetByPerson.set(personId, targetX);
+      });
+
+      Object.values(familyTree.unions).forEach(union => {
+        const partners = union.partnerIds.filter(partnerId => personSet.has(partnerId));
+        if (partners.length < 2) return;
+        for (let i = 0; i < partners.length; i += 1) {
+          for (let j = i + 1; j < partners.length; j += 1) {
+            spouseGraph.get(partners[i])?.add(partners[j]);
+            spouseGraph.get(partners[j])?.add(partners[i]);
+          }
+        }
+      });
+
+      const components: string[][] = [];
+      const visited = new Set<string>();
+
+      personsInGeneration.forEach(startPersonId => {
+        if (visited.has(startPersonId)) return;
+        const queue = [startPersonId];
+        const component: string[] = [];
+        visited.add(startPersonId);
+
+        while (queue.length > 0) {
+          const personId = queue.shift()!;
+          component.push(personId);
+          (spouseGraph.get(personId) ?? new Set<string>()).forEach(neighborId => {
+            if (visited.has(neighborId)) return;
+            visited.add(neighborId);
+            queue.push(neighborId);
           });
         }
+
+        components.push(component);
       });
 
-      // Check collisions between enforced groups themselves
-      for (let i = 0; i < enforcedGroups.length; i++) {
-        for (let j = i + 1; j < enforcedGroups.length; j++) {
-          const group1 = enforcedGroups[i];
-          const group2 = enforcedGroups[j];
+      const units: GenerationUnit[] = components.map(componentMembers => {
+        const members = componentMembers.slice().sort((aId, bId) => {
+          const aTarget = parentTargetByPerson.get(aId);
+          const bTarget = parentTargetByPerson.get(bId);
+          const aAnchored = Number.isFinite(aTarget);
+          const bAnchored = Number.isFinite(bTarget);
 
-          // Find min distance between any members of the two groups
-          let minDistance = Infinity;
-          let closer1: PositionedElement | null = null;
-          let closer2: PositionedElement | null = null;
-
-          for (const p1 of group1) {
-            for (const p2 of group2) {
-              const dist = Math.abs(p1.x - p2.x);
-              if (dist < minDistance) {
-                minDistance = dist;
-                closer1 = p1;
-                closer2 = p2;
-              }
+          if (
+            aAnchored &&
+            bAnchored &&
+            Math.abs((aTarget ?? 0) - (bTarget ?? 0)) > ANCHOR_EPSILON
+          ) {
+            return (aTarget ?? 0) - (bTarget ?? 0);
+          }
+          if (aAnchored !== bAnchored) {
+            return aAnchored ? -1 : 1;
+          }
+          return aAnchored && bAnchored ? comparePersonIds(aId, bId) : comparePartnerIds(aId, bId);
+        });
+        const memberSet = new Set(members);
+        const edges: Array<{ a: string; b: string }> = [];
+        members.forEach(memberId => {
+          (spouseGraph.get(memberId) ?? new Set<string>()).forEach(neighborId => {
+            if (!memberSet.has(neighborId)) return;
+            if (memberId < neighborId) {
+              edges.push({ a: memberId, b: neighborId });
             }
+          });
+        });
+
+        const optimizedMembers = optimizeMemberOrder(
+          members,
+          edges,
+          (leftId, rightId) => {
+            const leftTarget = parentTargetByPerson.get(leftId);
+            const rightTarget = parentTargetByPerson.get(rightId);
+            const leftAnchored = Number.isFinite(leftTarget);
+            const rightAnchored = Number.isFinite(rightTarget);
+
+            if (leftAnchored !== rightAnchored) {
+              return false;
+            }
+
+            if (
+              leftAnchored &&
+              rightAnchored &&
+              Math.abs((leftTarget ?? 0) - (rightTarget ?? 0)) > ANCHOR_EPSILON
+            ) {
+              return false;
+            }
+
+            return true;
           }
+        );
+        const gaps = optimizedMembers.slice(0, -1).map((leftId, index) => {
+          const rightId = optimizedMembers[index + 1];
+          return sharesUnion(leftId, rightId) ? COUPLE_GAP : SIBLING_GAP;
+        });
+        const width = optimizedMembers.length * PERSON_WIDTH + gaps.reduce((sum, gap) => sum + gap, 0);
 
-          if (minDistance < MIN_PERSON_DISTANCE && closer1 && closer2) {
-            const shiftAmount = (MIN_PERSON_DISTANCE - minDistance) / 2 + 1;
-            const direction = closer1.x < closer2.x ? -1 : 1;
+        const parentTargets: number[] = [];
+        optimizedMembers.forEach(memberId => {
+          const targetX = parentTargetByPerson.get(memberId);
+          if (targetX === undefined) return;
+          parentTargets.push(targetX);
+        });
 
-            group1.forEach(member => {
-              member.x += shiftAmount * direction;
-              const pos = positionedPersons.get(member.id);
-              if (pos) pos.x = member.x;
-            });
-
-            group2.forEach(member => {
-              member.x -= shiftAmount * direction;
-              const pos = positionedPersons.get(member.id);
-              if (pos) pos.x = member.x;
-            });
-          }
-        }
-      }
-    });
-
-    const separateSpouseGroupsInGen = (personsInGen: PositionedElement[]) => {
-      const groups = buildSpouseGroups(personsInGen).map(group => {
-        const xs = group.map(member => member.x);
         return {
-          group,
-          minX: Math.min(...xs),
-          maxX: Math.max(...xs),
+          members: optimizedMembers,
+          gaps,
+          width,
+          targetX: parentTargets.length > 0
+            ? parentTargets.reduce((sum, x) => sum + x, 0) / parentTargets.length
+            : Number.NaN,
+          left: 0,
+          sortKey: optimizedMembers[0] ?? '',
         };
-      }).sort((a, b) => a.minX - b.minX);
-
-      if (groups.length < 2) return;
-
-      let cursor = groups[0].maxX;
-      for (let i = 1; i < groups.length; i++) {
-        const entry = groups[i];
-        const desiredMin = cursor + MIN_PERSON_DISTANCE;
-        if (entry.minX < desiredMin) {
-          const shiftAmount = desiredMin - entry.minX;
-          entry.group.forEach(member => updateMemberX(member, member.x + shiftAmount));
-          entry.minX += shiftAmount;
-          entry.maxX += shiftAmount;
-        }
-        cursor = entry.maxX;
-      }
-    };
-
-    // STEP 5.6: Enforce spacing within spouse groups, then separate groups
-    personsByGeneration.forEach((personsInGen) => {
-      if (personsInGen.length < 2) return;
-
-      const groups = buildSpouseGroups(personsInGen);
-
-      groups.forEach(group => {
-        if (group.length < 2) return;
-        const originalMin = Math.min(...group.map(member => member.x));
-        const originalMax = Math.max(...group.map(member => member.x));
-        const originalCenter = (originalMin + originalMax) / 2;
-
-        const sorted = group.slice().sort((a, b) => a.x - b.x);
-        let cursor = sorted[0].x;
-        for (let i = 1; i < sorted.length; i++) {
-          const desiredX = cursor + MIN_PERSON_DISTANCE;
-          if (sorted[i].x < desiredX) {
-            updateMemberX(sorted[i], desiredX);
-          }
-          cursor = sorted[i].x;
-        }
-
-        const newMin = Math.min(...sorted.map(member => member.x));
-        const newMax = Math.max(...sorted.map(member => member.x));
-        const newCenter = (newMin + newMax) / 2;
-        shiftGroup(group, originalCenter - newCenter);
       });
 
-      separateSpouseGroupsInGen(personsInGen);
+      const anchoredUnits = units.filter(unit => Number.isFinite(unit.targetX));
+      const floatingUnits = units.filter(unit => !Number.isFinite(unit.targetX));
+      floatingUnits.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+      if (floatingUnits.length > 0) {
+        const floatingSpacing = PERSON_WIDTH + SIBLING_GAP;
+        const floatingWidth = (floatingUnits.length - 1) * floatingSpacing;
+        const anchorCenter = anchoredUnits.length > 0
+          ? anchoredUnits.reduce((sum, unit) => sum + unit.targetX, 0) / anchoredUnits.length
+          : 0;
+        const startX = anchorCenter - floatingWidth / 2;
+        floatingUnits.forEach((unit, index) => {
+          unit.targetX = startX + index * floatingSpacing;
+        });
+      }
+
+      units.sort((a, b) => {
+        if (a.targetX !== b.targetX) return a.targetX - b.targetX;
+        return a.sortKey.localeCompare(b.sortKey);
+      });
+
+      let cursorLeft = Number.NEGATIVE_INFINITY;
+      units.forEach(unit => {
+        const baselineLeft = unit.targetX - unit.width / 2;
+        const left = Math.max(baselineLeft, cursorLeft);
+        unit.left = left;
+        cursorLeft = left + unit.width + SIBLING_GAP;
+      });
+
+      if (units.length > 0) {
+        const minLeft = Math.min(...units.map(unit => unit.left));
+        const maxRight = Math.max(...units.map(unit => unit.left + unit.width));
+        const currentCenter = (minLeft + maxRight) / 2;
+        const targetCenter = units.reduce((sum, unit) => sum + unit.targetX, 0) / units.length;
+        const centerShift = targetCenter - currentCenter;
+        units.forEach(unit => {
+          unit.left += centerShift;
+        });
+      }
+
+      const y = generation * GENERATION_GAP;
+      units.forEach(unit => {
+        let memberCursor = unit.left;
+        unit.members.forEach((memberId, index) => {
+          const x = memberCursor + PERSON_WIDTH / 2;
+          positionedPersons.set(memberId, { x, y, generation });
+          memberCursor += PERSON_WIDTH;
+          if (index < unit.gaps.length) {
+            memberCursor += unit.gaps[index];
+          }
+        });
+      });
     });
 
-    // STEP 6: Update union symbol positions based on partner positions
-    elements.forEach(element => {
-      if (element.type !== 'union-symbol') return;
-      const union = familyTree.unions[element.id];
-      if (!union) return;
+    const allPersonPositions = Array.from(positionedPersons.values());
+    if (allPersonPositions.length > 0) {
+      const minX = Math.min(...allPersonPositions.map(pos => pos.x));
+      const maxX = Math.max(...allPersonPositions.map(pos => pos.x));
+      const centerX = (minX + maxX) / 2;
+      positionedPersons.forEach(pos => {
+        pos.x -= centerX;
+      });
+    }
 
+    const positionedUnions = new Map<string, { x: number; y: number; generation: number }>();
+    Object.values(familyTree.unions).forEach(union => {
       const partnerPositions = union.partnerIds
-        .map(id => positionedPersons.get(id))
+        .map(partnerId => positionedPersons.get(partnerId))
         .filter(Boolean) as { x: number; y: number; generation: number }[];
+      if (partnerPositions.length === 0) return;
 
-      if (partnerPositions.length >= 2) {
-        const newX = (partnerPositions[0].x + partnerPositions[1].x) / 2;
-        const newY = partnerPositions[0].y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
-        const newGeneration = partnerPositions[0].generation;
-        element.x = newX;
-        element.y = newY;
-        element.generation = newGeneration;
+      const visibleChildren = getEffectiveChildIds(union).filter(childId => positionedPersons.has(childId));
+      if (partnerPositions.length === 1 && visibleChildren.length === 0) return;
 
-        const unionPos = positionedUnions.get(element.id);
-        if (unionPos) {
-          unionPos.x = newX;
-          unionPos.y = newY;
-          unionPos.generation = newGeneration;
-        }
-      } else if (partnerPositions.length === 1) {
-        element.x = partnerPositions[0].x;
-        element.y = partnerPositions[0].y + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
-        element.generation = partnerPositions[0].generation;
-      }
+      const unionGeneration = partnerPositions[0].generation;
+      const symbolX = partnerPositions.reduce((sum, pos) => sum + pos.x, 0) / partnerPositions.length;
+      const symbolY = partnerPositions.length === 1
+        ? unionGeneration * GENERATION_GAP + SINGLE_PARENT_SYMBOL_TOP_OFFSET
+        : unionGeneration * GENERATION_GAP + AVATAR_VISUAL_CENTER - SYMBOL_SIZE / 2;
+
+      positionedUnions.set(union.id, {
+        x: symbolX,
+        y: symbolY,
+        generation: unionGeneration,
+      });
+    });
+
+    const elements: PositionedElement[] = [];
+    positionedPersons.forEach((pos, personId) => {
+      elements.push({ type: 'person', id: personId, x: pos.x, y: pos.y, generation: pos.generation });
+    });
+    positionedUnions.forEach((pos, unionId) => {
+      elements.push({
+        type: 'union-symbol',
+        id: unionId,
+        x: pos.x,
+        y: pos.y,
+        generation: pos.generation,
+        unionId,
+      });
+    });
+
+    elements.sort((a, b) => {
+      if (a.generation !== b.generation) return a.generation - b.generation;
+      if (a.x !== b.x) return a.x - b.x;
+      if (a.type !== b.type) return a.type === 'union-symbol' ? -1 : 1;
+      return a.id.localeCompare(b.id);
     });
 
     return { visibleElements: elements, collapsedDownUnions, collapsedUpPersons, collapsedSidePersons };
-  }, [familyTree, focusedPersonId, expandedPersons, getAncestorSide]);
+  }, [familyTree]);
 
   useEffect(() => {
     const nextVisible = new Set<string>();
@@ -1972,7 +1407,14 @@ export const FamilyTreeView = () => {
         union.partnerIds.forEach(p => personIds.add(p));
 
         // Add children
-        union.childIds.forEach(childId => personIds.add(childId));
+        const canonicalChildren = Object.values(familyTree.persons)
+          .filter(candidate => candidate.parentUnionId === union.id)
+          .map(candidate => candidate.id);
+        if (canonicalChildren.length > 0) {
+          canonicalChildren.forEach(childId => personIds.add(childId));
+        } else {
+          union.childIds.forEach(childId => personIds.add(childId));
+        }
       }
     });
 
@@ -2067,245 +1509,12 @@ export const FamilyTreeView = () => {
   };
 
   const unionSymbolOffsets = useMemo(() => {
-    const offsets = new Map<string, number>();
-    const personPositions = new Map<string, PositionedElement>();
-    const unionElements: PositionedElement[] = [];
-
-    visibleElements.forEach(element => {
-      if (element.type === 'person') {
-        personPositions.set(element.id, element);
-      } else if (element.type === 'union-symbol') {
-        unionElements.push(element);
-      }
-    });
-
-    type SpouseEntry = {
-      unionId: string;
-      minX: number;
-      maxX: number;
-      baseY: number;
-      minY: number;
-      maxY: number;
-      partnerIds: string[];
-    };
-
-    const unionsByGeneration = new Map<number, SpouseEntry[]>();
-
-    unionElements.forEach(element => {
-      const union = familyTree.unions[element.id];
-      if (!union) return;
-
-      const partnerPositions = union.partnerIds
-        .map(id => personPositions.get(id))
-        .filter(Boolean) as PositionedElement[];
-
-      if (partnerPositions.length < 2) return;
-
-      const partnerIds = union.partnerIds.filter(id => personPositions.has(id));
-      if (partnerIds.length < 2) return;
-
-      const minX = Math.min(...partnerPositions.map(partner => partner.x));
-      const maxX = Math.max(...partnerPositions.map(partner => partner.x));
-      const baseY = partnerPositions.reduce((sum, partner) => sum + partner.y + AVATAR_VISUAL_CENTER, 0) / partnerPositions.length;
-      const rowTop = Math.min(...partnerPositions.map(partner => partner.y));
-      const minY = rowTop + SPOUSE_MIN_OFFSET;
-      const maxY = rowTop + PERSON_HEIGHT - SPOUSE_TEXT_CLEARANCE;
-
-      const entry: SpouseEntry = { unionId: element.id, minX, maxX, baseY, minY, maxY, partnerIds };
-
-      if (!unionsByGeneration.has(element.generation)) {
-        unionsByGeneration.set(element.generation, []);
-      }
-      unionsByGeneration.get(element.generation)!.push(entry);
-    });
-
-    unionsByGeneration.forEach(entries => {
-      const unionCountByPerson = new Map<string, number>();
-
-      entries.forEach(entry => {
-        entry.partnerIds.forEach(partnerId => {
-          unionCountByPerson.set(partnerId, (unionCountByPerson.get(partnerId) ?? 0) + 1);
-        });
-      });
-
-      const offsetEntries = entries.filter(entry =>
-        entry.partnerIds.some(partnerId => (unionCountByPerson.get(partnerId) ?? 0) > 1)
-      );
-
-      if (offsetEntries.length === 0) return;
-
-      offsetEntries.sort((a, b) => a.minX - b.minX);
-
-      const layers: { maxX: number }[] = [];
-      const layerAssignments: number[] = [];
-
-      offsetEntries.forEach(entry => {
-        let layerIndex = -1;
-
-        for (let i = 0; i < layers.length; i += 1) {
-          if (entry.minX > layers[i].maxX) {
-            layerIndex = i;
-            layers[i].maxX = entry.maxX;
-            break;
-          }
-        }
-
-        if (layerIndex === -1) {
-          layerIndex = layers.length;
-          layers.push({ maxX: entry.maxX });
-        }
-
-        layerAssignments.push(layerIndex);
-      });
-
-      const layerCount = layers.length;
-      const availableOffsets = offsetEntries.map(entry =>
-        Math.max(0, Math.min(entry.baseY - entry.minY, entry.maxY - entry.baseY))
-      );
-      const maxOffset = Math.min(SPOUSE_MAX_OFFSET, Math.min(...availableOffsets));
-      const minSeparation = SYMBOL_RADIUS + 6;
-      const desiredStep = Math.max(SPOUSE_LINE_STEP, minSeparation);
-      const maxStep = layerCount > 1 ? (maxOffset * 2) / (layerCount - 1) : 0;
-      const step = layerCount > 1 ? Math.min(desiredStep, maxStep) : 0;
-
-      offsetEntries.forEach((entry, idx) => {
-        const offset = (layerAssignments[idx] - (layerCount - 1) / 2) * step;
-        const unclampedY = entry.baseY + offset;
-        const clampedY = Math.min(entry.maxY, Math.max(entry.minY, unclampedY));
-        offsets.set(entry.unionId, clampedY - entry.baseY);
-      });
-    });
-
-    return offsets;
-  }, [familyTree, visibleElements]);
+    return new Map<string, number>();
+  }, []);
 
   const unionSymbolXOffsets = useMemo(() => {
-    const offsets = new Map<string, number>();
-    const personPositions = new Map<string, PositionedElement>();
-    const unionElements: PositionedElement[] = [];
-
-    visibleElements.forEach(element => {
-      if (element.type === 'person') {
-        personPositions.set(element.id, element);
-      } else if (element.type === 'union-symbol') {
-        unionElements.push(element);
-      }
-    });
-
-    const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-    type Interval = { start: number; end: number };
-
-    const getSafeX = (candidateX: number, minX: number, maxX: number, blocks: Interval[]) => {
-      const clampedCandidate = clamp(candidateX, minX, maxX);
-      const normalized = blocks
-        .map(block => ({
-          start: Math.max(minX, block.start),
-          end: Math.min(maxX, block.end)
-        }))
-        .filter(block => block.end > block.start)
-        .sort((a, b) => a.start - b.start);
-
-      if (normalized.length === 0) {
-        return clampedCandidate;
-      }
-
-      const merged: Interval[] = [];
-      normalized.forEach(block => {
-        const last = merged[merged.length - 1];
-        if (!last || block.start > last.end) {
-          merged.push({ start: block.start, end: block.end });
-        } else {
-          last.end = Math.max(last.end, block.end);
-        }
-      });
-
-      const safe: Interval[] = [];
-      let cursor = minX;
-
-      merged.forEach(block => {
-        if (block.start > cursor) {
-          safe.push({ start: cursor, end: block.start });
-        }
-        cursor = Math.max(cursor, block.end);
-      });
-
-      if (cursor < maxX) {
-        safe.push({ start: cursor, end: maxX });
-      }
-
-      if (safe.length === 0) {
-        return clampedCandidate;
-      }
-
-      for (const interval of safe) {
-        if (clampedCandidate >= interval.start && clampedCandidate <= interval.end) {
-          return clampedCandidate;
-        }
-      }
-
-      let best = safe[0];
-      let bestDistance = Infinity;
-
-      safe.forEach(interval => {
-        const distance = clampedCandidate < interval.start
-          ? interval.start - clampedCandidate
-          : clampedCandidate - interval.end;
-
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = interval;
-        }
-      });
-
-      return clampedCandidate < best.start ? best.start : best.end;
-    };
-
-    unionElements.forEach(element => {
-      const union = familyTree.unions[element.id];
-      if (!union) return;
-
-      const partnerPositions = union.partnerIds
-        .map(id => personPositions.get(id))
-        .filter(Boolean) as PositionedElement[];
-
-      if (partnerPositions.length < 2) return;
-
-      const lineY = element.y + SYMBOL_SIZE / 2 + (unionSymbolOffsets.get(element.id) ?? 0);
-      const minPartnerX = Math.min(...partnerPositions.map(partner => partner.x));
-      const maxPartnerX = Math.max(...partnerPositions.map(partner => partner.x));
-      const safeMinX = minPartnerX + SYMBOL_RADIUS;
-      const safeMaxX = maxPartnerX - SYMBOL_RADIUS;
-
-      if (safeMinX >= safeMaxX) {
-        offsets.set(element.id, 0);
-        return;
-      }
-
-      const verticalClearance = SYMBOL_RADIUS + SYMBOL_AVATAR_GAP;
-      const horizontalClearance = AVATAR_RADIUS + SYMBOL_RADIUS + SYMBOL_AVATAR_GAP;
-      const blocks: Interval[] = [];
-
-      personPositions.forEach(person => {
-        const avatarTop = person.y;
-        const avatarBottom = person.y + AVATAR_SIZE;
-
-        if (lineY < avatarTop - verticalClearance || lineY > avatarBottom + verticalClearance) {
-          return;
-        }
-
-        blocks.push({
-          start: person.x - horizontalClearance,
-          end: person.x + horizontalClearance
-        });
-      });
-
-      const safeX = getSafeX(element.x, safeMinX, safeMaxX, blocks);
-      offsets.set(element.id, safeX - element.x);
-    });
-
-    return offsets;
-  }, [familyTree, visibleElements, unionSymbolOffsets]);
+    return new Map<string, number>();
+  }, []);
 
   const formatDate = (date: Person['birthDate']) => {
     const parts = [date.day, date.month, date.year].filter(Boolean);
@@ -2510,6 +1719,59 @@ export const FamilyTreeView = () => {
     const personPositions = new Map<string, PositionedElement>();
     const unionElements: PositionedElement[] = [];
 
+    const canonicalParentUnionByPerson = new Map<string, string>();
+    const listedUnionsByChild = new Map<string, string[]>();
+    Object.values(familyTree.unions)
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .forEach(union => {
+        union.childIds.forEach(childId => {
+          if (!familyTree.persons[childId]) return;
+          const existing = listedUnionsByChild.get(childId);
+          if (existing) {
+            if (!existing.includes(union.id)) {
+              existing.push(union.id);
+            }
+          } else {
+            listedUnionsByChild.set(childId, [union.id]);
+          }
+        });
+      });
+
+    Object.values(familyTree.persons).forEach(person => {
+      const listed = listedUnionsByChild.get(person.id) ?? [];
+      const preferredUnionId = person.parentUnionId && familyTree.unions[person.parentUnionId]
+        ? person.parentUnionId
+        : undefined;
+
+      let chosenUnionId: string | undefined;
+      if (preferredUnionId && listed.includes(preferredUnionId)) {
+        chosenUnionId = preferredUnionId;
+      } else if (listed.length > 0) {
+        chosenUnionId = listed[0];
+      } else if (preferredUnionId) {
+        chosenUnionId = preferredUnionId;
+      }
+
+      if (chosenUnionId) {
+        canonicalParentUnionByPerson.set(person.id, chosenUnionId);
+      }
+    });
+
+    const renderChildIdsByUnion = new Map<string, string[]>();
+    canonicalParentUnionByPerson.forEach((unionId, childId) => {
+      if (!familyTree.unions[unionId]) return;
+      const existing = renderChildIdsByUnion.get(unionId);
+      if (existing) {
+        existing.push(childId);
+      } else {
+        renderChildIdsByUnion.set(unionId, [childId]);
+      }
+    });
+
+    const getRenderChildIds = (union: Union) =>
+      renderChildIdsByUnion.get(union.id) ?? [];
+
     visibleElements.forEach(element => {
       if (element.type === 'person') {
         const draggedPosition = dragState.id === element.id && dragState.isDragging
@@ -2521,121 +1783,14 @@ export const FamilyTreeView = () => {
       }
     });
 
-    type UnionConnector = {
-      unionId: string;
-      symbolX: number;
-      symbolY: number;
-      minX: number;
-      maxX: number;
-      parentBottom: number;
-      childTop: number;
-      baseY: number;
-      gap: number;
-    };
-
-    const unionsByGeneration = new Map<number, UnionConnector[]>();
-
-    unionElements.forEach(element => {
-      const union = familyTree.unions[element.id];
-      if (!union) return;
-
-      const symbolOffset = unionSymbolOffsets.get(element.id) ?? 0;
-      const childPositions = union.childIds
-        .map(id => personPositions.get(id))
-        .filter(Boolean) as PositionedElement[];
-
-      if (childPositions.length === 0) return;
-
-      const partnerPositions = union.partnerIds
-        .map(id => personPositions.get(id))
-        .filter(Boolean) as PositionedElement[];
-
-      if (partnerPositions.length === 0) return;
-
-      const minChildX = Math.min(...childPositions.map(child => child.x));
-      const maxChildX = Math.max(...childPositions.map(child => child.x));
-      const symbolX = element.x;
-      const symbolY = element.y + SYMBOL_SIZE / 2 + symbolOffset;
-      const minX = Math.min(symbolX, minChildX);
-      const maxX = Math.max(symbolX, maxChildX);
-      const parentBottom = Math.max(...partnerPositions.map(partner => partner.y + PERSON_HEIGHT));
-      const childTop = Math.min(...childPositions.map(child => child.y));
-      const gap = Math.max(0, childTop - parentBottom);
-      const baseY = parentBottom + gap / 2;
-
-      const entry: UnionConnector = {
-        unionId: element.id,
-        symbolX,
-        symbolY,
-        minX,
-        maxX,
-        parentBottom,
-        childTop,
-        baseY,
-        gap
-      };
-
-      if (!unionsByGeneration.has(element.generation)) {
-        unionsByGeneration.set(element.generation, []);
-      }
-      unionsByGeneration.get(element.generation)!.push(entry);
-    });
-
-    // Assign connector layers within a generation to avoid overlapping horizontal spans.
-    const unionMidYById = new Map<string, number>();
-    const MIN_HORIZONTAL_GAP = 0;
-
-    unionsByGeneration.forEach(entries => {
-      entries.sort((a, b) => a.minX - b.minX);
-
-      const layers: { maxX: number }[] = [];
-      const layerAssignments: number[] = [];
-
-      entries.forEach(entry => {
-        let layerIndex = -1;
-
-        for (let i = 0; i < layers.length; i += 1) {
-          if (entry.minX > layers[i].maxX + MIN_HORIZONTAL_GAP) {
-            layerIndex = i;
-            layers[i].maxX = entry.maxX;
-            break;
-          }
-        }
-
-        if (layerIndex === -1) {
-          layerIndex = layers.length;
-          layers.push({ maxX: entry.maxX });
-        }
-
-        layerAssignments.push(layerIndex);
-      });
-
-      const layerCount = layers.length;
-      const minGap = Math.min(...entries.map(entry => entry.gap));
-      const maxSpread = Math.max(0, minGap - 2 * CONNECTOR_CLEARANCE);
-      const step = layerCount > 1
-        ? Math.min(CONNECTOR_STEP, maxSpread / (layerCount - 1))
-        : 0;
-
-      entries.forEach((entry, idx) => {
-        const offset = (layerAssignments[idx] - (layerCount - 1) / 2) * step;
-        const unclampedY = entry.baseY + offset;
-        const minY = entry.parentBottom + CONNECTOR_CLEARANCE;
-        const maxY = entry.childTop - CONNECTOR_CLEARANCE;
-        const midY = minY <= maxY
-          ? Math.min(maxY, Math.max(minY, unclampedY))
-          : entry.baseY;
-        unionMidYById.set(entry.unionId, midY);
-      });
-    });
-
     // Now draw connections
     unionElements.forEach(element => {
       const union = familyTree.unions[element.id];
       if (!union) return;
 
       const symbolOffset = unionSymbolOffsets.get(element.id) ?? 0;
-      const symbolX = element.x;
+      const symbolXOffset = unionSymbolXOffsets.get(element.id) ?? 0;
+      const symbolX = element.x + symbolXOffset;
       const symbolY = element.y + SYMBOL_SIZE / 2 + symbolOffset;
 
       const partnerPositions = union.partnerIds
@@ -2643,86 +1798,133 @@ export const FamilyTreeView = () => {
         .filter(Boolean) as PositionedElement[];
 
       if (partnerPositions.length > 1) {
-        const minPartnerX = Math.min(...partnerPositions.map(partner => partner.x));
-        const maxPartnerX = Math.max(...partnerPositions.map(partner => partner.x));
+        const sortedPartners = partnerPositions
+          .slice()
+          .sort((a, b) => a.x - b.x);
 
-        // Horizontal marriage line at symbol Y (center of union symbol)
-        lines.push(
-          <line
-            key={`spouse-horizontal-${element.id}`}
-            x1={minPartnerX}
-            y1={symbolY}
-            x2={maxPartnerX}
-            y2={symbolY}
-            className={getLineClassName(`connection-line spouse ${union.status === 'divorced' ? 'divorced' : ''}`, element.id)}
-          />
-        );
-      } else if (partnerPositions.length === 1) {
-        const partner = partnerPositions[0];
-        const partnerCenterY = partner.y + PERSON_HEIGHT / 2;
-        if (Math.abs(partnerCenterY - symbolY) > 0.5) {
+        for (let i = 0; i < sortedPartners.length - 1; i += 1) {
+          const left = sortedPartners[i];
+          const right = sortedPartners[i + 1];
+
+          let spouseLineStartX = left.x + AVATAR_VISUAL_CENTER;
+          let spouseLineEndX = right.x - AVATAR_VISUAL_CENTER;
+
+          if (spouseLineEndX <= spouseLineStartX + 1) {
+            spouseLineStartX = left.x;
+            spouseLineEndX = right.x;
+          }
+
           lines.push(
             <line
-              key={`spouse-vertical-${element.id}-${partner.id}`}
-              x1={partner.x}
-              y1={partnerCenterY}
-              x2={partner.x}
+              key={`spouse-horizontal-${element.id}-${left.id}-${right.id}`}
+              x1={spouseLineStartX}
+              y1={symbolY}
+              x2={spouseLineEndX}
               y2={symbolY}
               className={getLineClassName(`connection-line spouse ${union.status === 'divorced' ? 'divorced' : ''}`, element.id)}
             />
           );
         }
+      } else if (partnerPositions.length === 1) {
+        const partner = partnerPositions[0];
+        const sameColumn = Math.abs(symbolX - partner.x) <= 0.5;
+
+        if (sameColumn) {
+          const lineStartY = partner.y + PERSON_HEIGHT;
+          const lineEndY = symbolY - SYMBOL_RADIUS;
+
+          if (Math.abs(lineEndY - lineStartY) > 0.5) {
+            lines.push(
+              <line
+                key={`spouse-direct-${element.id}-${partner.id}`}
+                x1={partner.x}
+                y1={lineStartY}
+                x2={symbolX}
+                y2={lineEndY}
+                className={getLineClassName(`connection-line spouse ${union.status === 'divorced' ? 'divorced' : ''}`, element.id)}
+              />
+            );
+          }
+        } else {
+          const partnerCenterY = partner.y + AVATAR_VISUAL_CENTER;
+          const direction = symbolX >= partner.x ? 1 : -1;
+          const partnerEdgeX = partner.x + direction * AVATAR_VISUAL_CENTER;
+          const symbolEdgeX = symbolX - direction * SYMBOL_RADIUS;
+
+          if (
+            Math.abs(partnerCenterY - symbolY) > 0.5 ||
+            Math.abs(symbolEdgeX - partnerEdgeX) > 0.5
+          ) {
+            lines.push(
+              <line
+                key={`spouse-direct-${element.id}-${partner.id}`}
+                x1={partnerEdgeX}
+                y1={partnerCenterY}
+                x2={symbolEdgeX}
+                y2={symbolY}
+                className={getLineClassName(`connection-line spouse ${union.status === 'divorced' ? 'divorced' : ''}`, element.id)}
+              />
+            );
+          }
+        }
       }
 
       // Draw line down to children
-      const childPositions = union.childIds
+      const childPositions = getRenderChildIds(union)
         .map(id => personPositions.get(id))
         .filter(Boolean) as PositionedElement[];
 
       if (childPositions.length > 0) {
-        const midY = unionMidYById.get(element.id) ?? (symbolY + SYMBOL_SIZE / 2 + CONNECTOR_CLEARANCE);
+        // Orthogonal connections: vertical down, horizontal bar, vertical drops
+        const childTop = Math.min(...childPositions.map(c => c.y));
+        const JUNCTION_PAD = 20;
+        const junctionY = childTop - JUNCTION_PAD;
+        const minChildX = Math.min(...childPositions.map(c => c.x));
+        const maxChildX = Math.max(...childPositions.map(c => c.x));
 
-        // Vertical line from symbol down to midY
+        // Vertical line from symbol down to junction
         lines.push(
           <line
             key={`parent-vertical-${element.id}`}
             x1={symbolX}
             y1={symbolY}
             x2={symbolX}
-            y2={midY}
+            y2={junctionY}
             className={getLineClassName("connection-line parent", element.id)}
           />
         );
 
-        const minChildX = Math.min(...childPositions.map(child => child.x));
-        const maxChildX = Math.max(...childPositions.map(child => child.x));
+        // Horizontal bar must also exist for a single off-center child.
+        const needsHorizontalBar =
+          Math.abs(maxChildX - minChildX) > 0.5 ||
+          Math.abs(symbolX - minChildX) > 0.5;
+        if (needsHorizontalBar) {
+          lines.push(
+            <line
+              key={`parent-horizontal-${element.id}`}
+              x1={Math.min(symbolX, minChildX)}
+              y1={junctionY}
+              x2={Math.max(symbolX, maxChildX)}
+              y2={junctionY}
+              className={getLineClassName("connection-line parent", element.id)}
+            />
+          );
+        }
 
-        // Horizontal line at the calculated height
-        lines.push(
-          <line
-            key={`parent-horizontal-${element.id}`}
-            x1={Math.min(symbolX, minChildX)}
-            y1={midY}
-            x2={Math.max(symbolX, maxChildX)}
-            y2={midY}
-            className={getLineClassName("connection-line parent", element.id)}
-          />
-        );
-
-        // Vertical lines to each child
+        // Vertical drop from junction to each child
         childPositions.forEach(child => {
           lines.push(
             <line
               key={`parent-child-${element.id}-${child.id}`}
               x1={child.x}
-              y1={midY}
+              y1={junctionY}
               x2={child.x}
               y2={child.y}
               className={getLineClassName("connection-line parent", element.id)}
             />
           );
         });
-      } else if (collapsedDownUnions.has(element.id) && union.childIds.length > 0) {
+      } else if (collapsedDownUnions.has(element.id) && getRenderChildIds(union).length > 0) {
         const stubStartY = symbolY;
         const stubEndY = stubStartY + COLLAPSED_BRANCH_LENGTH;
 
@@ -3031,7 +2233,7 @@ export const FamilyTreeView = () => {
         </div>
       </div>
 
-      {unconnectedPersons.length > 0 && (
+      {!isFullTreeLayout && unconnectedPersons.length > 0 && (
         <div className="tree-unconnected-bar">
           <span>{copy.notLinkedLabel}</span>
           {unconnectedPersons.map(person => (
@@ -3176,3 +2378,4 @@ export const FamilyTreeView = () => {
     </div>
   );
 };
+
