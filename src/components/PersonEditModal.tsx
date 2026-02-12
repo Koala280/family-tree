@@ -1,8 +1,11 @@
 import { useRef, useMemo, useState } from 'react';
-import { Person, DateInfo } from '../types';
+import { Person } from '../types';
 import { useFamilyTree } from '../context/FamilyTreeContext';
 import { translations } from '../i18n';
-import { getLastNameList } from '../utils/person';
+import { getLastNameList, getKnownDiseaseEntries, getKnownDiseaseList, getInheritedHereditaryDiseaseRisks } from '../utils/person';
+import { DateField, normalizeDateInputOnBlur, sanitizeDateInput } from '../utils/dateInput';
+import { normalizeInlineTextOnCommit } from '../utils/textInput';
+import { RichTextEditor } from './RichTextEditor';
 
 interface PersonEditModalProps {
   person: Person;
@@ -14,17 +17,33 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const copy = translations[language];
   const [activeLastNameIndex, setActiveLastNameIndex] = useState<number | null>(null);
+  const [activeKnownDiseaseIndex, setActiveKnownDiseaseIndex] = useState<number | null>(null);
+  const [isCauseOfDeathFocused, setIsCauseOfDeathFocused] = useState(false);
   const lastNameInputs = (() => {
     const lastNames = getLastNameList(person);
     return lastNames.length > 0 ? lastNames : [''];
   })();
+  const knownDiseaseInputs = (() => {
+    const knownDiseases = getKnownDiseaseEntries(person);
+    return knownDiseases.length > 0 ? knownDiseases : [{ name: '', hereditary: false }];
+  })();
   const normalizeLastName = (value: string) =>
+    value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const normalizeKnownDisease = (value: string) =>
+    value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const normalizeCauseOfDeath = (value: string) =>
     value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
   const currentNormalized = new Set(
     lastNameInputs
       .map(value => value.trim())
       .filter(Boolean)
       .map(normalizeLastName)
+  );
+  const currentKnownDiseaseNormalized = new Set(
+    knownDiseaseInputs
+      .map(entry => entry.name.trim())
+      .filter(Boolean)
+      .map(normalizeKnownDisease)
   );
   const allLastNames = useMemo(() => {
     if (!familyTree) return [];
@@ -72,23 +91,88 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
       .filter(name => !currentNormalized.has(normalizeLastName(name)))
       .sort((a, b) => a.localeCompare(b));
   }, [familyTree, person, currentNormalized]);
+  const allKnownDiseases = useMemo(() => {
+    if (!familyTree) return [];
+    const unique = new Set<string>();
+    Object.values(familyTree.persons).forEach(entry => {
+      getKnownDiseaseList(entry).forEach(disease => {
+        const trimmed = disease.trim();
+        if (trimmed) {
+          unique.add(trimmed);
+        }
+      });
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [familyTree]);
+  const allCausesOfDeath = useMemo(() => {
+    if (!familyTree) return [];
+    const unique = new Set<string>();
+    Object.values(familyTree.persons).forEach(entry => {
+      const trimmed = (entry.causeOfDeath ?? '').trim();
+      if (trimmed) {
+        unique.add(trimmed);
+      }
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [familyTree]);
+  const inheritedDiseaseRisks = useMemo(() => {
+    if (!familyTree) return [];
+    return getInheritedHereditaryDiseaseRisks(familyTree, person.id);
+  }, [familyTree, person.id]);
 
   const handleInputChange = (field: keyof Person, value: unknown) => {
     updatePerson(person.id, { [field]: value });
   };
 
-  const handleDateChange = (dateType: 'birthDate' | 'deathDate', field: keyof DateInfo, value: string) => {
+  const handleDateChange = (dateType: 'birthDate' | 'deathDate', field: DateField, value: string) => {
     const currentDate = person[dateType];
-    handleInputChange(dateType, { ...currentDate, [field]: value });
+    const nextDate = sanitizeDateInput(currentDate, field, value);
+    if (!nextDate) return;
+    handleInputChange(dateType, nextDate);
+  };
+
+  const getDateValidationMessage = (field: DateField) => {
+    if (field === 'day') return `${copy.day}: 01-31`;
+    if (field === 'month') return `${copy.month}: 01-12`;
+    return `${copy.year}: ${new Date().getFullYear()}`;
+  };
+
+  const handleDateBlur = (
+    dateType: 'birthDate' | 'deathDate',
+    field: DateField,
+    input: HTMLInputElement
+  ) => {
+    const currentDate = {
+      ...person[dateType],
+      [field]: input.value,
+    };
+    const { nextDate, invalidField } = normalizeDateInputOnBlur(currentDate, field);
+    if (invalidField) {
+      input.setCustomValidity(getDateValidationMessage(invalidField));
+      input.reportValidity();
+    } else {
+      input.setCustomValidity('');
+    }
+    handleInputChange(dateType, nextDate);
   };
 
   const handleGenderChange = (gender: 'male' | 'female') => {
     handleInputChange('gender', person.gender === gender ? null : gender);
   };
 
+  const handleFirstNameBlur = (value: string) => {
+    handleInputChange('firstName', normalizeInlineTextOnCommit(value));
+  };
+
   const handleLastNameChange = (index: number, value: string) => {
     const next = [...lastNameInputs];
     next[index] = value;
+    updatePerson(person.id, { lastNames: next });
+  };
+
+  const handleLastNameBlur = (index: number, value: string) => {
+    const next = [...lastNameInputs];
+    next[index] = normalizeInlineTextOnCommit(value);
     updatePerson(person.id, { lastNames: next });
   };
 
@@ -111,12 +195,20 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
     if (currentNormalized.has(normalizeLastName(trimmed))) return;
 
     if (typeof targetIndex === 'number') {
-      if (!lastNameInputs[targetIndex]?.trim()) {
+      if (lastNameInputs[targetIndex]?.trim()) {
         const next = [...lastNameInputs];
         next[targetIndex] = trimmed;
         updatePerson(person.id, { lastNames: next });
         return;
       }
+    }
+
+    const firstEmptyIndex = lastNameInputs.findIndex(value => !value.trim());
+    if (firstEmptyIndex >= 0) {
+      const next = [...lastNameInputs];
+      next[firstEmptyIndex] = trimmed;
+      updatePerson(person.id, { lastNames: next });
+      return;
     }
 
     updatePerson(person.id, { lastNames: [...lastNameInputs, trimmed] });
@@ -128,6 +220,91 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
     return allLastNames
       .filter(name => normalizeLastName(name).includes(normalized))
       .filter(name => !currentNormalized.has(normalizeLastName(name)))
+      .slice(0, 8);
+  };
+
+  const handleKnownDiseaseChange = (index: number, value: string) => {
+    const next = [...knownDiseaseInputs];
+    next[index] = { ...next[index], name: value };
+    updatePerson(person.id, { knownDiseases: next });
+  };
+
+  const handleKnownDiseaseBlur = (index: number, value: string) => {
+    const next = [...knownDiseaseInputs];
+    next[index] = { ...next[index], name: normalizeInlineTextOnCommit(value) };
+    updatePerson(person.id, { knownDiseases: next });
+  };
+
+  const handleKnownDiseaseHereditaryChange = (index: number, hereditary: boolean) => {
+    const next = [...knownDiseaseInputs];
+    next[index] = { ...next[index], hereditary };
+    updatePerson(person.id, { knownDiseases: next });
+  };
+
+  const handleAddKnownDisease = () => {
+    updatePerson(person.id, { knownDiseases: [...knownDiseaseInputs, { name: '', hereditary: false }] });
+  };
+
+  const handleRemoveKnownDisease = (index: number) => {
+    if (knownDiseaseInputs.length <= 1) {
+      updatePerson(person.id, { knownDiseases: [{ name: '', hereditary: false }] });
+      return;
+    }
+    const next = knownDiseaseInputs.filter((_, idx) => idx !== index);
+    updatePerson(person.id, { knownDiseases: next });
+  };
+
+  const applySuggestedKnownDisease = (name: string, targetIndex?: number) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (currentKnownDiseaseNormalized.has(normalizeKnownDisease(trimmed))) return;
+
+    if (typeof targetIndex === 'number') {
+      if (knownDiseaseInputs[targetIndex]?.name.trim()) {
+        const next = [...knownDiseaseInputs];
+        next[targetIndex] = { ...next[targetIndex], name: trimmed };
+        updatePerson(person.id, { knownDiseases: next });
+        return;
+      }
+    }
+
+    const firstEmptyIndex = knownDiseaseInputs.findIndex(entry => !entry.name.trim());
+    if (firstEmptyIndex >= 0) {
+      const next = [...knownDiseaseInputs];
+      next[firstEmptyIndex] = { ...next[firstEmptyIndex], name: trimmed };
+      updatePerson(person.id, { knownDiseases: next });
+      return;
+    }
+
+    updatePerson(person.id, { knownDiseases: [...knownDiseaseInputs, { name: trimmed, hereditary: false }] });
+  };
+
+  const getMatchingKnownDiseases = (value: string) => {
+    const normalized = normalizeKnownDisease(value);
+    if (!normalized) return [];
+    return allKnownDiseases
+      .filter(name => normalizeKnownDisease(name).includes(normalized))
+      .filter(name => !currentKnownDiseaseNormalized.has(normalizeKnownDisease(name)))
+      .slice(0, 8);
+  };
+
+  const applySuggestedCauseOfDeath = (cause: string) => {
+    const trimmed = cause.trim();
+    if (!trimmed) return;
+    handleInputChange('causeOfDeath', trimmed);
+    setIsCauseOfDeathFocused(false);
+  };
+
+  const handleCauseOfDeathBlur = (value: string) => {
+    handleInputChange('causeOfDeath', normalizeInlineTextOnCommit(value));
+  };
+
+  const getMatchingCausesOfDeath = (value: string) => {
+    const normalized = normalizeCauseOfDeath(value);
+    if (!normalized) return [];
+    return allCausesOfDeath
+      .filter(cause => normalizeCauseOfDeath(cause).includes(normalized))
+      .filter(cause => normalizeCauseOfDeath(cause) !== normalized)
       .slice(0, 8);
   };
 
@@ -144,7 +321,7 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content person-edit-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{copy.editPersonTitle}</h2>
           <button type="button" className="modal-close" onClick={onClose} aria-label={copy.closeLabel}>
@@ -199,11 +376,12 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
               type="text"
               value={person.firstName || ''}
               onChange={(e) => handleInputChange('firstName', e.target.value)}
+              onBlur={(event) => handleFirstNameBlur(event.currentTarget.value)}
               placeholder={copy.firstName}
             />
           </div>
 
-          <div className="form-group">
+          <div className="form-group person-last-name-group">
             <label>{copy.columnLastNames}</label>
             <div className="last-name-list">
               {relatedLastNames.length > 0 && (
@@ -224,7 +402,7 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                 </div>
               )}
               {lastNameInputs.map((value, index) => (
-                <div key={`last-name-${person.id}-${index}`} className="last-name-row">
+                <div key={`last-name-${person.id}-${index}`} className="last-name-row person-last-name-row">
                   <div className="last-name-input-wrapper">
                     {(() => {
                       const matching = activeLastNameIndex === index && value.trim()
@@ -237,7 +415,10 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                             value={value}
                             onChange={(e) => handleLastNameChange(index, e.target.value)}
                             onFocus={() => setActiveLastNameIndex(index)}
-                            onBlur={() => window.setTimeout(() => setActiveLastNameIndex(null), 120)}
+                            onBlur={(event) => {
+                              handleLastNameBlur(index, event.currentTarget.value);
+                              window.setTimeout(() => setActiveLastNameIndex(null), 120);
+                            }}
                             placeholder={copy.lastName}
                           />
                           {matching.length > 0 && (
@@ -266,10 +447,14 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                   </div>
                   <button
                     type="button"
-                    className="btn-inline-remove"
+                    className="btn-inline-remove btn-inline-remove-icon"
                     onClick={() => handleRemoveLastName(index)}
+                    aria-label={copy.removeLastName}
+                    title={copy.removeLastName}
                   >
-                    {copy.removeLastName}
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
                   </button>
                 </div>
               ))}
@@ -330,22 +515,37 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
             <div className="date-inputs">
               <input
                 type="text"
+                inputMode="numeric"
                 value={person.birthDate.day || ''}
-                onChange={(e) => handleDateChange('birthDate', 'day', e.target.value)}
+                onChange={(event) => {
+                  event.currentTarget.setCustomValidity('');
+                  handleDateChange('birthDate', 'day', event.target.value);
+                }}
+                onBlur={(event) => handleDateBlur('birthDate', 'day', event.currentTarget)}
                 placeholder={copy.day}
                 maxLength={2}
               />
               <input
                 type="text"
+                inputMode="numeric"
                 value={person.birthDate.month || ''}
-                onChange={(e) => handleDateChange('birthDate', 'month', e.target.value)}
+                onChange={(event) => {
+                  event.currentTarget.setCustomValidity('');
+                  handleDateChange('birthDate', 'month', event.target.value);
+                }}
+                onBlur={(event) => handleDateBlur('birthDate', 'month', event.currentTarget)}
                 placeholder={copy.month}
                 maxLength={2}
               />
               <input
                 type="text"
+                inputMode="numeric"
                 value={person.birthDate.year || ''}
-                onChange={(e) => handleDateChange('birthDate', 'year', e.target.value)}
+                onChange={(event) => {
+                  event.currentTarget.setCustomValidity('');
+                  handleDateChange('birthDate', 'year', event.target.value);
+                }}
+                onBlur={(event) => handleDateBlur('birthDate', 'year', event.currentTarget)}
                 placeholder={copy.year}
                 maxLength={4}
               />
@@ -357,55 +557,188 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
             <div className="date-inputs">
               <input
                 type="text"
+                inputMode="numeric"
                 value={person.deathDate.day || ''}
-                onChange={(e) => handleDateChange('deathDate', 'day', e.target.value)}
+                onChange={(event) => {
+                  event.currentTarget.setCustomValidity('');
+                  handleDateChange('deathDate', 'day', event.target.value);
+                }}
+                onBlur={(event) => handleDateBlur('deathDate', 'day', event.currentTarget)}
                 placeholder={copy.day}
                 maxLength={2}
               />
               <input
                 type="text"
+                inputMode="numeric"
                 value={person.deathDate.month || ''}
-                onChange={(e) => handleDateChange('deathDate', 'month', e.target.value)}
+                onChange={(event) => {
+                  event.currentTarget.setCustomValidity('');
+                  handleDateChange('deathDate', 'month', event.target.value);
+                }}
+                onBlur={(event) => handleDateBlur('deathDate', 'month', event.currentTarget)}
                 placeholder={copy.month}
                 maxLength={2}
               />
               <input
                 type="text"
+                inputMode="numeric"
                 value={person.deathDate.year || ''}
-                onChange={(e) => handleDateChange('deathDate', 'year', e.target.value)}
+                onChange={(event) => {
+                  event.currentTarget.setCustomValidity('');
+                  handleDateChange('deathDate', 'year', event.target.value);
+                }}
+                onBlur={(event) => handleDateBlur('deathDate', 'year', event.currentTarget)}
                 placeholder={copy.year}
                 maxLength={4}
               />
             </div>
           </div>
 
-          <div className="form-group">
-            <label>{copy.causeOfDeath}</label>
-            <input
-              type="text"
-              value={person.causeOfDeath || ''}
-              onChange={(e) => handleInputChange('causeOfDeath', e.target.value)}
-              placeholder={copy.causeOfDeath}
-            />
+          <div className="form-group person-known-disease-group">
+            <label>{copy.knownDiseases}</label>
+            <div className="last-name-list">
+              {knownDiseaseInputs.map((entry, index) => (
+                <div key={`known-disease-${person.id}-${index}`} className="last-name-row known-disease-row">
+                  <div className="last-name-input-wrapper">
+                    {(() => {
+                      const matching = activeKnownDiseaseIndex === index && entry.name.trim()
+                        ? getMatchingKnownDiseases(entry.name)
+                        : [];
+                      return (
+                        <>
+                          <input
+                            type="text"
+                            value={entry.name}
+                            onChange={(e) => handleKnownDiseaseChange(index, e.target.value)}
+                            onFocus={() => setActiveKnownDiseaseIndex(index)}
+                            onBlur={(event) => {
+                              handleKnownDiseaseBlur(index, event.currentTarget.value);
+                              window.setTimeout(() => setActiveKnownDiseaseIndex(null), 120);
+                            }}
+                            placeholder={copy.knownDiseases}
+                          />
+                          {matching.length > 0 && (
+                            <div className="last-name-dropdown">
+                              {matching.map(name => (
+                                <button
+                                  key={`known-disease-option-${person.id}-${index}-${name}`}
+                                  type="button"
+                                  className="last-name-dropdown-item"
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={() => applySuggestedKnownDisease(name, index)}
+                                >
+                                  {name}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {activeKnownDiseaseIndex === index && entry.name.trim() && matching.length === 0 && (
+                            <div className="last-name-dropdown">
+                              <div className="last-name-dropdown-empty">{copy.knownDiseaseSuggestionsEmpty}</div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+                  <div className="known-disease-controls">
+                    <label className="known-disease-hereditary">
+                      <input
+                        type="checkbox"
+                        checked={entry.hereditary === true}
+                        onChange={(event) => handleKnownDiseaseHereditaryChange(index, event.target.checked)}
+                      />
+                      <span>{copy.hereditaryLabel}</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="btn-inline-remove btn-inline-remove-icon"
+                      onClick={() => handleRemoveKnownDisease(index)}
+                      aria-label={copy.removeKnownDisease}
+                      title={copy.removeKnownDisease}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button type="button" className="btn-inline-add" onClick={handleAddKnownDisease}>
+                + {copy.addKnownDisease}
+              </button>
+            </div>
           </div>
 
           <div className="form-group">
-            <label>{copy.knownDiseases}</label>
-            <textarea
-              value={person.knownDiseases || ''}
-              onChange={(e) => handleInputChange('knownDiseases', e.target.value)}
-              placeholder={copy.knownDiseases}
-              rows={3}
-            />
+            <label>{copy.causeOfDeath}</label>
+            <div className="last-name-input-wrapper">
+              {(() => {
+                const causeValue = person.causeOfDeath || '';
+                const matching = isCauseOfDeathFocused && causeValue.trim()
+                  ? getMatchingCausesOfDeath(causeValue)
+                  : [];
+                return (
+                  <>
+                    <input
+                      type="text"
+                      value={causeValue}
+                      onChange={(e) => handleInputChange('causeOfDeath', e.target.value)}
+                      onFocus={() => setIsCauseOfDeathFocused(true)}
+                      onBlur={(event) => {
+                        handleCauseOfDeathBlur(event.currentTarget.value);
+                        window.setTimeout(() => setIsCauseOfDeathFocused(false), 120);
+                      }}
+                      placeholder={copy.causeOfDeath}
+                    />
+                    {matching.length > 0 && (
+                      <div className="last-name-dropdown">
+                        {matching.map(cause => (
+                          <button
+                            key={`cause-of-death-option-${person.id}-${cause}`}
+                            type="button"
+                            className="last-name-dropdown-item"
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => applySuggestedCauseOfDeath(cause)}
+                          >
+                            {cause}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {isCauseOfDeathFocused && causeValue.trim() && matching.length === 0 && (
+                      <div className="last-name-dropdown">
+                        <div className="last-name-dropdown-empty">{copy.causeOfDeathSuggestionsEmpty}</div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>{copy.potentialHereditaryRisks}</label>
+            {inheritedDiseaseRisks.length > 0 ? (
+              <div className="hereditary-risk-list">
+                {inheritedDiseaseRisks.map(disease => (
+                  <span key={`risk-${person.id}-${disease}`} className="hereditary-risk-chip">
+                    {disease}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="hereditary-risk-empty">{copy.potentialHereditaryRisksEmpty}</div>
+            )}
           </div>
 
           <div className="form-group">
             <label>{copy.notes}</label>
-            <textarea
+            <RichTextEditor
               value={person.notes || ''}
-              onChange={(e) => handleInputChange('notes', e.target.value)}
+              onChange={(nextValue) => handleInputChange('notes', nextValue)}
               placeholder={copy.notes}
-              rows={4}
+              ariaLabel={copy.notes}
             />
           </div>
         </div>

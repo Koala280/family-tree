@@ -1,7 +1,32 @@
-import { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
-import { Person, FamilyTree, FamilyTreesData, FamilyTreeMetadata, Union, UnionStatus } from '../types';
+import { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
+import { Person, FamilyTree, FamilyTreesData, FamilyTreeMetadata, Union, UnionStatus, KnownDiseaseEntry } from '../types';
 import { PasswordModal } from '../components/PasswordModal';
 import { translations, isLanguageCode, type LanguageCode } from '../i18n';
+
+type AppView = 'manager' | 'tree' | 'table';
+const HISTORY_VIEW_KEY = '__family_tree_view';
+const SHARED_IMPORT_QUERY_KEY = 'shareImport';
+const SHARED_IMPORT_CACHE_PATH = '/__shared-tree-import__.json';
+
+type LaunchParamsWithFiles = {
+  files?: Array<{
+    getFile: () => Promise<File>;
+  }>;
+};
+
+type LaunchQueueWithFiles = {
+  setConsumer: (consumer: (launchParams: LaunchParamsWithFiles) => void) => void;
+};
+
+const isAppView = (value: unknown): value is AppView => (
+  value === 'manager' || value === 'tree' || value === 'table'
+);
+
+const getViewFromHistoryState = (state: unknown): AppView | null => {
+  if (!state || typeof state !== 'object') return null;
+  const candidate = (state as Record<string, unknown>)[HISTORY_VIEW_KEY];
+  return isAppView(candidate) ? candidate : null;
+};
 
 interface FamilyTreeContextType {
   // Current tree operations
@@ -19,8 +44,8 @@ interface FamilyTreeContextType {
   // Tree management operations
   allTrees: Record<string, FamilyTreeMetadata>;
   activeTreeId: string | null;
-  currentView: 'manager' | 'tree' | 'table';
-  setCurrentView: (view: 'manager' | 'tree' | 'table') => void;
+  currentView: AppView;
+  setCurrentView: (view: AppView) => void;
   createTree: (name: string) => void;
   selectTree: (treeId: string) => void;
   renameTree: (treeId: string, newName: string) => void;
@@ -43,6 +68,7 @@ const ENCRYPTION_ITERATIONS = 310000;
 const ENCRYPTION_SALT_BYTES = 16;
 const ENCRYPTION_IV_BYTES = 12;
 const ENCRYPTION_TYPE = 'family-tree-export';
+const INLINE_WHITESPACE_PATTERN = /[ \t\f\v\u00a0]+/g;
 
 type PasswordModalState = {
   title: string;
@@ -154,6 +180,42 @@ const decryptExportPayload = async (payload: any, password: string) => {
   return JSON.parse(decoder.decode(plaintextBuffer));
 };
 
+const normalizeInlineText = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value.replace(INLINE_WHITESPACE_PATTERN, ' ').trim();
+};
+
+const normalizeMultilineText = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\r\n?/g, '\n');
+};
+
+const normalizeKnownDiseases = (value: unknown): KnownDiseaseEntry[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry): KnownDiseaseEntry | null => {
+        if (typeof entry === 'string') {
+          return { name: entry, hereditary: false };
+        }
+        if (entry && typeof entry === 'object') {
+          const candidate = entry as { name?: unknown; hereditary?: unknown };
+          if (typeof candidate.name === 'string') {
+            return {
+              name: candidate.name,
+              hereditary: candidate.hereditary === true,
+            };
+          }
+        }
+        return null;
+      })
+      .filter((entry): entry is KnownDiseaseEntry => entry !== null);
+  }
+  if (typeof value === 'string') {
+    return [{ name: value, hereditary: false }];
+  }
+  return [];
+};
+
 const createEmptyPerson = (): Person => ({
   id: createId(),
   firstName: '',
@@ -163,7 +225,7 @@ const createEmptyPerson = (): Person => ({
   birthDate: {},
   deathDate: {},
   causeOfDeath: '',
-  knownDiseases: '',
+  knownDiseases: [],
   notes: '',
   photo: undefined,
   parentUnionId: null,
@@ -191,21 +253,23 @@ const normalizeTree = (tree: any): FamilyTree => {
   const unions: Record<string, Union> = tree.unions && typeof tree.unions === 'object' ? tree.unions : {};
 
   Object.values(tree.persons || {}).forEach((person: any) => {
+    const normalizedLastNames: string[] = Array.isArray(person.lastNames)
+      ? person.lastNames.map((name: unknown) => normalizeInlineText(name))
+      : person.lastName
+        ? [normalizeInlineText(person.lastName)]
+        : [];
+    const primaryLastName = normalizedLastNames.find(name => name.length > 0) ?? '';
     persons[person.id] = {
       id: person.id,
-      firstName: person.firstName ?? '',
-      lastName: person.lastName ?? (Array.isArray(person.lastNames) ? person.lastNames[0] ?? '' : ''),
-      lastNames: Array.isArray(person.lastNames)
-        ? person.lastNames
-        : person.lastName
-          ? [person.lastName]
-          : [],
+      firstName: normalizeInlineText(person.firstName ?? ''),
+      lastName: primaryLastName,
+      lastNames: normalizedLastNames,
       gender: person.gender ?? null,
       birthDate: person.birthDate ?? {},
       deathDate: person.deathDate ?? {},
-      causeOfDeath: person.causeOfDeath ?? '',
-      knownDiseases: person.knownDiseases ?? '',
-      notes: person.notes ?? '',
+      causeOfDeath: normalizeInlineText(person.causeOfDeath ?? ''),
+      knownDiseases: normalizeKnownDiseases(person.knownDiseases),
+      notes: normalizeMultilineText(person.notes ?? ''),
       photo: person.photo,
       parentUnionId: person.parentUnionId ?? null,
       unionIds: [],
@@ -253,7 +317,7 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     };
   });
 
-  const [currentView, setCurrentView] = useState<'manager' | 'tree' | 'table'>(() => {
+  const [currentView, setCurrentViewState] = useState<AppView>(() => {
     return treesData.activeTreeId ? 'tree' : 'manager';
   });
   const [language, setLanguage] = useState<LanguageCode>(() => {
@@ -268,7 +332,41 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
   });
   const [passwordModal, setPasswordModal] = useState<PasswordModalState | null>(null);
   const passwordResolverRef = useRef<((value: string | null) => void) | null>(null);
+  const hasPrimedHistoryRef = useRef(false);
   const copy = translations[language];
+
+  const setCurrentView = (view: AppView) => {
+    if (view === currentView) return;
+
+    if (typeof window !== 'undefined') {
+      const existing = window.history.state;
+      const existingState = existing && typeof existing === 'object'
+        ? (existing as Record<string, unknown>)
+        : {};
+      const currentHistoryView = getViewFromHistoryState(existing);
+
+      // Keep one in-app step back from tree to manager across devices/browser back.
+      if (view === 'tree' && currentHistoryView !== 'manager') {
+        window.history.pushState(
+          {
+            ...existingState,
+            [HISTORY_VIEW_KEY]: 'manager',
+          },
+          ''
+        );
+      }
+
+      window.history.pushState(
+        {
+          ...existingState,
+          [HISTORY_VIEW_KEY]: view,
+        },
+        ''
+      );
+    }
+
+    setCurrentViewState(view);
+  };
 
   const requestPassword = (options: PasswordModalState) => {
     return new Promise<string | null>((resolve) => {
@@ -302,6 +400,58 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     document.documentElement.lang = language;
   }, [language]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || hasPrimedHistoryRef.current) return;
+
+    const existing = window.history.state;
+    const existingState = existing && typeof existing === 'object'
+      ? (existing as Record<string, unknown>)
+      : {};
+
+    hasPrimedHistoryRef.current = true;
+    window.history.replaceState(
+      {
+        ...existingState,
+        [HISTORY_VIEW_KEY]: currentView,
+      },
+      ''
+    );
+
+    // If app starts in a sub view, create one in-app step back to overview.
+    if (currentView !== 'manager') {
+      window.history.pushState(
+        {
+          ...existingState,
+          [HISTORY_VIEW_KEY]: 'manager',
+        },
+        ''
+      );
+      window.history.pushState(
+        {
+          ...existingState,
+          [HISTORY_VIEW_KEY]: currentView,
+        },
+        ''
+      );
+    }
+  }, [currentView]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handlePopState = (event: PopStateEvent) => {
+      const historyView = getViewFromHistoryState(event.state);
+      if (historyView) {
+        setCurrentViewState(historyView);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
   const currentTree = treesData.activeTreeId ? treesData.trees[treesData.activeTreeId] : null;
 
   const updateCurrentTree = (updater: (tree: FamilyTree) => FamilyTree) => {
@@ -328,9 +478,20 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
       ...createEmptyPerson(),
       ...personData,
     };
+    newPerson.firstName = normalizeInlineText(newPerson.firstName);
+    newPerson.lastNames = Array.isArray(newPerson.lastNames)
+      ? newPerson.lastNames.map(name => normalizeInlineText(name))
+      : [];
+    newPerson.lastName = normalizeInlineText(newPerson.lastName);
+    if (!newPerson.lastName) {
+      newPerson.lastName = newPerson.lastNames.find(name => name.trim().length > 0) ?? '';
+    }
+    newPerson.causeOfDeath = normalizeInlineText(newPerson.causeOfDeath);
+    newPerson.notes = normalizeMultilineText(newPerson.notes);
     if (Array.isArray(newPerson.lastNames) && !newPerson.lastName) {
       newPerson.lastName = newPerson.lastNames.find(name => name.trim().length > 0) ?? '';
     }
+    newPerson.knownDiseases = normalizeKnownDiseases(newPerson.knownDiseases);
 
     updateCurrentTree(tree => ({
       ...tree,
@@ -345,9 +506,17 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
 
   const updatePerson = (id: string, updates: Partial<Person>) => {
     const nextUpdates = { ...updates };
+    if (Array.isArray(updates.lastNames)) {
+      nextUpdates.lastNames = updates.lastNames
+        .filter((name): name is string => typeof name === 'string');
+    }
     if (Array.isArray(updates.lastNames) && updates.lastName === undefined) {
-      const primary = updates.lastNames.find(name => name.trim().length > 0) ?? '';
+      const normalizedLastNames = (nextUpdates.lastNames as string[]) ?? [];
+      const primary = normalizedLastNames.find(name => name.trim().length > 0) ?? '';
       nextUpdates.lastName = primary;
+    }
+    if (updates.knownDiseases !== undefined) {
+      nextUpdates.knownDiseases = normalizeKnownDiseases(updates.knownDiseases);
     }
     updateCurrentTree(tree => ({
       ...tree,
@@ -501,6 +670,49 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
             : [...person2.unionIds, existingUnion.id],
         };
         createdUnionId = existingUnion.id;
+        return {
+          ...tree,
+          persons: newPersons,
+          unions: newUnions,
+        };
+      }
+
+      const singleParentUnions = person1.unionIds
+        .map(id => newUnions[id])
+        .filter((union): union is Union => Boolean(
+          union
+          && union.partnerIds.length === 1
+          && union.partnerIds[0] === person1Id
+        ));
+
+      if (singleParentUnions.length >= 1) {
+        const targetUnion = singleParentUnions.reduce((best, candidate) => {
+          if (candidate.childIds.length !== best.childIds.length) {
+            return candidate.childIds.length > best.childIds.length ? candidate : best;
+          }
+          return candidate.id < best.id ? candidate : best;
+        });
+        newUnions[targetUnion.id] = {
+          ...targetUnion,
+          partnerIds: targetUnion.partnerIds.includes(person2Id)
+            ? targetUnion.partnerIds
+            : [...targetUnion.partnerIds, person2Id],
+          status: targetUnion.status === 'divorced' ? 'active' : targetUnion.status,
+        };
+        newPersons[person1Id] = {
+          ...person1,
+          unionIds: person1.unionIds.includes(targetUnion.id)
+            ? person1.unionIds
+            : [...person1.unionIds, targetUnion.id],
+        };
+        newPersons[person2Id] = {
+          ...person2,
+          unionIds: person2.unionIds.includes(targetUnion.id)
+            ? person2.unionIds
+            : [...person2.unionIds, targetUnion.id],
+        };
+        createdUnionId = targetUnion.id;
+
         return {
           ...tree,
           persons: newPersons,
@@ -845,84 +1057,150 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     })();
   };
 
+  const commitImportedTree = useCallback((decryptedData: any) => {
+    if (decryptedData.tree && decryptedData.metadata) {
+      const newTreeId = createId();
+      const now = new Date().toISOString();
+      const normalizedTree = normalizeTree(decryptedData.tree);
+
+      setTreesData(prev => ({
+        trees: {
+          ...prev.trees,
+          [newTreeId]: normalizedTree,
+        },
+        metadata: {
+          ...prev.metadata,
+          [newTreeId]: {
+            ...decryptedData.metadata,
+            id: newTreeId,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        activeTreeId: newTreeId,
+      }));
+
+      setCurrentView('tree');
+      return true;
+    }
+
+    alert(copy.importUnknownFormat);
+    return false;
+  }, [copy.importUnknownFormat, setCurrentView]);
+
+  const importTreeFromRawText = useCallback(async (rawText: string) => {
+    try {
+      const importedData = JSON.parse(rawText);
+      const decryptedData = importedData?.ciphertext
+        ? await (async () => {
+            if (!crypto?.subtle || !crypto?.getRandomValues) {
+              alert(copy.decryptUnavailable);
+              return null;
+            }
+            const password = await requestPassword({
+              title: copy.importTitle,
+              description: copy.importDescription,
+              confirmLabel: copy.importConfirm,
+              requireConfirm: false,
+              minLength: 1,
+            });
+            if (!password) return null;
+            return decryptExportPayload(importedData, password);
+          })()
+        : importedData;
+
+      if (!decryptedData) return false;
+      return commitImportedTree(decryptedData);
+    } catch (error) {
+      alert(copy.importError);
+      return false;
+    }
+  }, [
+    commitImportedTree,
+    copy.decryptUnavailable,
+    copy.importConfirm,
+    copy.importDescription,
+    copy.importError,
+    copy.importTitle,
+    requestPassword,
+  ]);
+
+  const importTreeFromFile = useCallback(async (file: File) => {
+    try {
+      const rawText = await file.text();
+      return importTreeFromRawText(rawText);
+    } catch (error) {
+      alert(copy.importError);
+      return false;
+    }
+  }, [copy.importError, importTreeFromRawText]);
+
   const importTree = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = 'application/json';
+    input.accept = 'application/json,.json';
     input.style.display = 'none';
     document.body.appendChild(input);
     const cleanup = () => {
       input.value = '';
       input.remove();
     };
-    input.onchange = (e: any) => {
-      const file = e.target.files[0];
+    input.onchange = (e: Event) => {
+      const target = e.target as HTMLInputElement | null;
+      const file = target?.files?.[0];
       if (file) {
-        const reader = new FileReader();
-        reader.onload = (event: any) => {
-          void (async () => {
-            try {
-              const rawText = String(event.target.result ?? '');
-              const importedData = JSON.parse(rawText);
-              const decryptedData = importedData?.ciphertext
-                ? await (async () => {
-                    if (!crypto?.subtle || !crypto?.getRandomValues) {
-                      alert(copy.decryptUnavailable);
-                      return null;
-                    }
-                    const password = await requestPassword({
-                      title: copy.importTitle,
-                      description: copy.importDescription,
-                      confirmLabel: copy.importConfirm,
-                      requireConfirm: false,
-                      minLength: 1,
-                    });
-                    if (!password) return null;
-                    return decryptExportPayload(importedData, password);
-                  })()
-                : importedData;
-
-              if (!decryptedData) return;
-
-              // Import format with metadata
-              if (decryptedData.tree && decryptedData.metadata) {
-                const newTreeId = createId();
-                const now = new Date().toISOString();
-                const normalizedTree = normalizeTree(decryptedData.tree);
-
-                setTreesData(prev => ({
-                  trees: {
-                    ...prev.trees,
-                    [newTreeId]: normalizedTree,
-                  },
-                  metadata: {
-                    ...prev.metadata,
-                    [newTreeId]: {
-                      ...decryptedData.metadata,
-                      id: newTreeId,
-                      createdAt: now,
-                      updatedAt: now,
-                    },
-                  },
-                  activeTreeId: newTreeId,
-                }));
-
-                setCurrentView('tree');
-                return;
-              }
-
-              alert(copy.importUnknownFormat);
-            } catch (error) {
-              alert(copy.importError);
-            }
-          })();
-        };
-        reader.readAsText(file);
+        void importTreeFromFile(file);
       }
       cleanup();
     };
     input.click();
   };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const launchQueue = (window as Window & { launchQueue?: LaunchQueueWithFiles }).launchQueue;
+    if (!launchQueue || typeof launchQueue.setConsumer !== 'function') return;
+
+    launchQueue.setConsumer((launchParams: LaunchParamsWithFiles) => {
+      const firstHandle = launchParams.files?.[0];
+      if (!firstHandle || typeof firstHandle.getFile !== 'function') return;
+
+      void (async () => {
+        try {
+          const file = await firstHandle.getFile();
+          await importTreeFromFile(file);
+        } catch (error) {
+          alert(copy.importError);
+        }
+      })();
+    });
+  }, [copy.importError, importTreeFromFile]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.searchParams.get(SHARED_IMPORT_QUERY_KEY) !== '1') return;
+
+    void (async () => {
+      try {
+        const response = await fetch(SHARED_IMPORT_CACHE_PATH, { cache: 'no-store' });
+        if (response.ok) {
+          const sharedText = await response.text();
+          if (sharedText.trim()) {
+            await importTreeFromRawText(sharedText);
+          }
+        }
+      } catch (error) {
+        alert(copy.importError);
+      } finally {
+        currentUrl.searchParams.delete(SHARED_IMPORT_QUERY_KEY);
+        const nextUrl = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
+        window.history.replaceState(window.history.state, '', nextUrl);
+      }
+    })();
+  }, [copy.importError, importTreeFromRawText]);
 
   return (
     <FamilyTreeContext.Provider

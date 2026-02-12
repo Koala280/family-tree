@@ -1,4 +1,6 @@
-const CACHE_NAME = 'family-tree-cache-v1';
+const CACHE_NAME = 'family-tree-cache-v2';
+const SHARE_TARGET_PATH = '/share-target';
+const SHARED_IMPORT_CACHE_PATH = '/__shared-tree-import__.json';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -6,6 +8,30 @@ const APP_SHELL = [
   '/icon-192.svg',
   '/icon-512.svg'
 ];
+
+const handleShareTarget = async (request) => {
+  try {
+    const formData = await request.formData();
+    const sharedFile = formData.get('treeFile');
+
+    if (sharedFile && typeof sharedFile.text === 'function') {
+      const rawText = await sharedFile.text();
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(
+        SHARED_IMPORT_CACHE_PATH,
+        new Response(rawText, {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        })
+      );
+    }
+  } catch (error) {
+    // Ignore malformed payloads and continue to app shell.
+  }
+
+  return Response.redirect('/?shareImport=1', 303);
+};
 
 self.addEventListener('install', event => {
   event.waitUntil(
@@ -25,10 +51,15 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const { request } = event;
-  if (request.method !== 'GET') return;
-
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+
+  if (request.method === 'POST' && url.pathname === SHARE_TARGET_PATH) {
+    event.respondWith(handleShareTarget(request));
+    return;
+  }
+
+  if (request.method !== 'GET') return;
 
   if (request.mode === 'navigate') {
     event.respondWith(

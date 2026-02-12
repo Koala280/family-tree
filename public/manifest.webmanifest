@@ -5,8 +5,46 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
   "theme_color": "#2f2c7e",
   "background_color": "#1f1d4d",
+  "file_handlers": [
+    {
+      "action": "/",
+      "accept": {
+        "application/octet-stream": [
+          ".json"
+        ],
+        "text/plain": [
+          ".json",
+          ".txt"
+        ],
+        "application/json": [
+          ".json"
+        ]
+      }
+    }
+  ],
+  "share_target": {
+    "action": "/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "treeFile",
+          "accept": [
+            "application/octet-stream",
+            "text/plain",
+            "application/json",
+            ".json"
+          ]
+        }
+      ]
+    }
+  },
   "icons": [
     {
       "src": "/icon-192.svg",

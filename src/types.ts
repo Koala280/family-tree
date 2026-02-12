@@ -20,6 +20,11 @@ export interface PersonPosition {
   generation: number;
 }
 
+export interface KnownDiseaseEntry {
+  name: string;
+  hereditary?: boolean;
+}
+
 export interface Person {
   id: string;
   firstName?: string;
@@ -29,7 +34,7 @@ export interface Person {
   birthDate: DateInfo;
   deathDate: DateInfo;
   causeOfDeath?: string;
-  knownDiseases?: string;
+  knownDiseases?: KnownDiseaseEntry[];
   notes?: string;
   photo?: string;
   parentUnionId: string | null;
