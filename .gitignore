@@ -1,8 +1,49 @@
-/.claude
-/node_modules
-/dist
-/.vite
+# -----------------------------
+# Runtime / package managers
+# -----------------------------
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+
+# -----------------------------
+# Build artifacts
+# -----------------------------
+dist/
+.vite/
+coverage/
 *.tsbuildinfo
+
+# -----------------------------
+# Environment files
+# -----------------------------
 .env
 .env.local
 .env.*.local
+!.env.example
+
+# -----------------------------
+# Firebase local state
+# -----------------------------
+.firebase/
+.firebaserc
+
+# -----------------------------
+# Logs
+# -----------------------------
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------
+# Editors / OS
+# -----------------------------
+.editorconfig
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

@@ -1610,7 +1610,40 @@ body.tree-view-active #root {
 }
 
 .rich-text-select {
-  padding: 0 8px;
+  min-width: 108px;
+  padding: 0 30px 0 10px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-color: #f8fafc;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #64748b 50%),
+    linear-gradient(135deg, #64748b 50%, transparent 50%),
+    linear-gradient(to right, rgba(148, 163, 184, 0.6), rgba(148, 163, 184, 0.6));
+  background-position:
+    calc(100% - 14px) calc(50% - 2px),
+    calc(100% - 9px) calc(50% - 2px),
+    calc(100% - 28px) 50%;
+  background-size: 5px 5px, 5px 5px, 1px 62%;
+  background-repeat: no-repeat;
+}
+
+.rich-text-select:hover {
+  background-color: #eef2ff;
+  border-color: #a5b4fc;
+  color: #4338ca;
+}
+
+.rich-text-select:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.16);
+}
+
+.rich-text-select option {
+  color: #0f172a;
+  background: #ffffff;
 }
 
 .rich-text-btn {
@@ -1723,6 +1756,15 @@ body.tree-view-active #root {
 .table-rich-notes .rich-text-btn {
   min-width: 26px;
   padding: 0 5px;
+}
+
+.table-rich-notes .rich-text-select {
+  min-width: 96px;
+  padding-right: 24px;
+  background-position:
+    calc(100% - 12px) calc(50% - 2px),
+    calc(100% - 7px) calc(50% - 2px),
+    calc(100% - 22px) 50%;
 }
 
 .date-inputs {
@@ -4175,13 +4217,19 @@ body.tree-view-active #root {
 }
 
 .tree-card-edit {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
   gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   flex: 1;
 }
 
 .tree-rename-input {
-  flex: 1;
+  width: 100%;
+  min-width: 0;
   padding: 8px 12px;
   border: 2px solid #667eea;
   border-radius: 8px;
@@ -4196,6 +4244,7 @@ body.tree-view-active #root {
 
 .btn-save-rename,
 .btn-cancel-rename {
+  flex-shrink: 0;
   width: 36px;
   height: 36px;
   border: none;

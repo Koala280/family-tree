@@ -340,18 +340,6 @@ export const RichTextEditor = ({
   return (
     <div className={rootClassName}>
       <div className="rich-text-toolbar" role="toolbar" aria-label={`${ariaLabel} toolbar`}>
-        <button
-          type="button"
-          className={`rich-text-btn ${formatPainterSnapshot ? 'active' : ''}`}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={handleFormatPainterButtonClick}
-          title="Format kopieren / einfügen"
-          aria-pressed={Boolean(formatPainterSnapshot)}
-        >
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M7 3h10v4H7V3zm-2 6h14v2h-1v10H6V11H5V9zm3 2v8h8v-8H8z" />
-          </svg>
-        </button>
         <select
           className="rich-text-select"
           defaultValue=""
@@ -372,6 +360,18 @@ export const RichTextEditor = ({
           <option value="BLOCKQUOTE">Zitat</option>
           <option value="PRE">Code</option>
         </select>
+        <button
+          type="button"
+          className={`rich-text-btn ${formatPainterSnapshot ? 'active' : ''}`}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={handleFormatPainterButtonClick}
+          title="Format kopieren / einfügen"
+          aria-pressed={Boolean(formatPainterSnapshot)}
+        >
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M7 3h10v4H7V3zm-2 6h14v2h-1v10H6V11H5V9zm3 2v8h8v-8H8z" />
+          </svg>
+        </button>
         <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('bold')} title="Fett (Ctrl+B)">B</button>
         <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('italic')} title="Kursiv (Ctrl+I)">I</button>
         <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('underline')} title="Unterstrichen (Ctrl+U)">U</button>

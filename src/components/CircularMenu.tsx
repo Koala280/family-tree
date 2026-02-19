@@ -2,7 +2,7 @@ import { useEffect, useState, type MouseEvent } from 'react';
 import { Person } from '../types';
 import { useFamilyTree } from '../context/FamilyTreeContext';
 import { translations } from '../i18n';
-import { getDisplayName } from '../utils/person';
+import { getLastNameList } from '../utils/person';
 
 interface CircularMenuProps {
   person: Person;
@@ -29,7 +29,9 @@ export const CircularMenu = ({
   onDelete,
   onClose,
 }: CircularMenuProps) => {
-  const personName = getDisplayName(person);
+  const firstName = (person.firstName ?? '').trim();
+  const firstLastName = getLastNameList(person).find((name) => name.trim().length > 0)?.trim() ?? '';
+  const personName = [firstName, firstLastName].filter(Boolean).join(' ').trim();
   const [isReady, setIsReady] = useState(false);
   const { language } = useFamilyTree();
   const copy = translations[language];
