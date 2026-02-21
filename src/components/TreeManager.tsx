@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useRef, type DragEvent } from 'react';
 import { FamilyTreeMetadata } from '../types';
 import { useFamilyTree } from '../context/FamilyTreeContext';
 import { translations, getLocale, languageOptions, type LanguageCode } from '../i18n';
@@ -12,6 +12,7 @@ interface TreeManagerProps {
   onDeleteTree: (treeId: string) => void;
   onExportTree: (treeId: string) => void;
   onImportTree: () => void;
+  onImportTreeFile: (file: File) => Promise<boolean>;
   onOpenTable: (treeId: string) => void;
 }
 
@@ -25,16 +26,25 @@ const renderFlag = (code: LanguageCode) => {
     case 'de':
       return (
         <svg viewBox="0 0 3 2" aria-hidden="true" focusable="false">
-          <rect width="3" height="2" fill="#000" />
-          <rect width="3" height="1.33" y="0.67" fill="#DD0000" />
-          <rect width="3" height="0.67" y="1.33" fill="#FFCE00" />
+          <rect width="3" height="0.67" y="0" fill="#000" />
+          <rect width="3" height="0.66" y="0.66" fill="#DD0000" />
+          <rect width="3" height="0.68" y="1.32" fill="#FFCE00" />
         </svg>
       );
     case 'lv':
       return (
         <svg viewBox="0 0 3 2" aria-hidden="true" focusable="false">
-          <rect width="3" height="2" fill="#9E1B34" />
-          <rect y="0.8" width="3" height="0.4" fill="#F2F2F2" />
+          <rect width="3" height="2" fill="#A11F3B" />
+          <rect y="0.75" width="3" height="0.5" fill="#F2F2F2" />
+        </svg>
+      );
+    case 'custom':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3a14 14 0 0 1 0 18" />
+          <path d="M12 3a14 14 0 0 0 0 18" />
         </svg>
       );
     default:
@@ -57,6 +67,7 @@ export const TreeManager = ({
   onDeleteTree,
   onExportTree,
   onImportTree,
+  onImportTreeFile,
   onOpenTable,
 }: TreeManagerProps) => {
   const [newTreeName, setNewTreeName] = useState('');
@@ -65,7 +76,9 @@ export const TreeManager = ({
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isStandalone, setIsStandalone] = useState(false);
   const [showInstallHint, setShowInstallHint] = useState(false);
-  const { language, setLanguage } = useFamilyTree();
+  const [isDragActive, setIsDragActive] = useState(false);
+  const dragDepthRef = useRef(0);
+  const { language, hasCustomLanguagePack, setLanguage, importCustomLanguage } = useFamilyTree();
   const copy = translations[language];
   const locale = getLocale(language);
 
@@ -158,26 +171,103 @@ export const TreeManager = ({
     });
   };
 
+  const hasFilePayload = (event: DragEvent<HTMLDivElement>) => {
+    const { dataTransfer } = event;
+    if (!dataTransfer) return false;
+    if (dataTransfer.files && dataTransfer.files.length > 0) return true;
+    if (dataTransfer.items && Array.from(dataTransfer.items).some((item) => item.kind === 'file')) return true;
+    return Array.from(dataTransfer.types ?? []).includes('Files');
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFilePayload(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current += 1;
+    setIsDragActive(true);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFilePayload(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+    setIsDragActive(true);
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFilePayload(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFilePayload(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    void onImportTreeFile(file);
+  };
+
+  const handleLanguageSelect = (code: LanguageCode) => {
+    if (code !== 'custom') {
+      setLanguage(code);
+      return;
+    }
+
+    if (language !== 'custom' && hasCustomLanguagePack) {
+      setLanguage('custom');
+      return;
+    }
+
+    importCustomLanguage();
+  };
+
   return (
-    <div className="tree-manager">
+    <div
+      className={`tree-manager ${isDragActive ? 'drag-active' : ''}`}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="tree-manager-header">
         <div className="language-switch">
           <span className="language-switch-label">{copy.languageLabel}</span>
           <div className="language-switch-buttons">
-            {languageOptions.map(option => (
-              <button
-                key={option.code}
-                type="button"
-                className={`language-button ${language === option.code ? 'active' : ''}`}
-                onClick={() => setLanguage(option.code)}
-                aria-pressed={language === option.code}
-                aria-label={option.name}
-                title={option.name}
-              >
-                <span className="language-flag">{renderFlag(option.code)}</span>
-                <span className="language-code">{option.label}</span>
-              </button>
-            ))}
+            {languageOptions.map(option => {
+              const isCustomOption = option.code === 'custom';
+              const customOptionLabel = (!hasCustomLanguagePack || language === 'custom')
+                ? 'Custom (Import JSON)'
+                : option.name;
+
+              return (
+                <button
+                  key={option.code}
+                  type="button"
+                  className={`language-button ${language === option.code ? 'active' : ''}`}
+                  onClick={() => handleLanguageSelect(option.code)}
+                  aria-pressed={language === option.code}
+                  aria-label={isCustomOption ? customOptionLabel : option.name}
+                  title={isCustomOption ? customOptionLabel : option.name}
+                >
+                  <span className={`language-flag ${option.code === 'custom' ? 'is-custom' : ''}`}>
+                    {renderFlag(option.code)}
+                  </span>
+                  <span className="language-code">{option.label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
         <h1>{copy.managerTitle}</h1>
@@ -216,6 +306,9 @@ export const TreeManager = ({
               {copy.installApp}
             </button>
           )}
+        </div>
+        <div className={`import-drop-zone ${isDragActive ? 'active' : ''}`}>
+          {isDragActive ? copy.importDropActive : copy.importDropHint}
         </div>
         {showInstallHint && isIos && isSafari && (
           <div className="pwa-install-hint">{copy.installAppHint}</div>
@@ -325,3 +418,4 @@ export const TreeManager = ({
     </div>
   );
 };
+

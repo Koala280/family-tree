@@ -1,4 +1,6 @@
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { useFamilyTree } from '../context/FamilyTreeContext';
+import { translations } from '../i18n';
 import { isRichTextEmpty, normalizeRichTextForStorage } from '../utils/richText';
 
 type RichTextEditorProps = {
@@ -43,11 +45,15 @@ export const RichTextEditor = ({
   className = '',
   compact = false,
 }: RichTextEditorProps) => {
+  const { language } = useFamilyTree();
+  const copy = translations[language];
   const editorRef = useRef<HTMLDivElement | null>(null);
   const savedRangeRef = useRef<Range | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [isEmpty, setIsEmpty] = useState(true);
   const [formatPainterSnapshot, setFormatPainterSnapshot] = useState<FormatPainterSnapshot | null>(null);
+  const [isFormatOpen, setIsFormatOpen] = useState(false);
+  const formatDropdownRef = useRef<HTMLDivElement>(null);
 
   const rootClassName = useMemo(
     () => `rich-text-input ${compact ? 'compact' : ''} ${className}`.trim(),
@@ -261,6 +267,17 @@ export const RichTextEditor = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (!isFormatOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (formatDropdownRef.current && !formatDropdownRef.current.contains(e.target as Node)) {
+        setIsFormatOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isFormatOpen]);
+
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' && formatPainterSnapshot) {
       setFormatPainterSnapshot(null);
@@ -308,7 +325,7 @@ export const RichTextEditor = ({
     }
     if (key === 'k') {
       event.preventDefault();
-      const linkUrl = window.prompt('Link URL');
+      const linkUrl = window.prompt(copy.richTextPromptLinkUrl);
       if (linkUrl?.trim()) {
         executeCommand('createLink', linkUrl.trim());
       }
@@ -339,62 +356,77 @@ export const RichTextEditor = ({
 
   return (
     <div className={rootClassName}>
-      <div className="rich-text-toolbar" role="toolbar" aria-label={`${ariaLabel} toolbar`}>
-        <select
-          className="rich-text-select"
-          defaultValue=""
-          onPointerDown={() => saveSelection()}
-          onMouseDown={() => saveSelection()}
-          onChange={(event) => {
-            handleBlockTypeChange(event.target.value);
-            event.target.value = '';
-          }}
-          aria-label="Format"
-        >
-          <option value="" disabled>
-            Format
-          </option>
-          <option value="P">Text</option>
-          <option value="H2">H2</option>
-          <option value="H3">H3</option>
-          <option value="BLOCKQUOTE">Zitat</option>
-          <option value="PRE">Code</option>
-        </select>
+      <div className="rich-text-toolbar" role="toolbar" aria-label={copy.richTextToolbarAria(ariaLabel)}>
+        <div className={`rich-text-format-dropdown${isFormatOpen ? ' open' : ''}`} ref={formatDropdownRef}>
+          <button
+            type="button"
+            className="rich-text-format-trigger"
+            onMouseDown={(e) => { e.preventDefault(); saveSelection(); }}
+            onClick={() => setIsFormatOpen(!isFormatOpen)}
+            aria-label={copy.richTextFormatLabel}
+            aria-expanded={isFormatOpen}
+          >
+            <span>{copy.richTextFormatLabel}</span>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4" /></svg>
+          </button>
+          {isFormatOpen && (
+            <div className="rich-text-format-menu" role="listbox" aria-label={copy.richTextFormatLabel}>
+              {([
+                ['P', copy.richTextFormatOptionParagraph],
+                ['H2', copy.richTextFormatOptionH2],
+                ['H3', copy.richTextFormatOptionH3],
+                ['BLOCKQUOTE', copy.richTextFormatOptionQuote],
+                ['PRE', copy.richTextFormatOptionCode],
+              ] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  type="button"
+                  className="rich-text-format-option"
+                  role="option"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => { handleBlockTypeChange(val); setIsFormatOpen(false); }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           className={`rich-text-btn ${formatPainterSnapshot ? 'active' : ''}`}
           onMouseDown={(event) => event.preventDefault()}
           onClick={handleFormatPainterButtonClick}
-          title="Format kopieren / einfügen"
+          title={copy.richTextFormatPainterTitle}
           aria-pressed={Boolean(formatPainterSnapshot)}
         >
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M7 3h10v4H7V3zm-2 6h14v2h-1v10H6V11H5V9zm3 2v8h8v-8H8z" />
           </svg>
         </button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('bold')} title="Fett (Ctrl+B)">B</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('italic')} title="Kursiv (Ctrl+I)">I</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('underline')} title="Unterstrichen (Ctrl+U)">U</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('strikeThrough')} title="Durchgestrichen (Ctrl+Shift+X)">S</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('insertUnorderedList')} title="Aufzählung (Ctrl+Shift+8)">•</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('insertOrderedList')} title="Nummerierung (Ctrl+Shift+7)">1.</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('formatBlock', 'BLOCKQUOTE')} title="Zitat">"</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('removeFormat')} title="Formatierung entfernen">Tx</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('bold')} title={copy.richTextBoldTitle}>B</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('italic')} title={copy.richTextItalicTitle}>I</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('underline')} title={copy.richTextUnderlineTitle}>U</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('strikeThrough')} title={copy.richTextStrikeTitle}>S</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('insertUnorderedList')} title={copy.richTextBulletListTitle}>•</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('insertOrderedList')} title={copy.richTextNumberedListTitle}>1.</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('formatBlock', 'BLOCKQUOTE')} title={copy.richTextQuoteTitle}>"</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('removeFormat')} title={copy.richTextClearFormattingTitle}>Tx</button>
         <button
           type="button"
           className="rich-text-btn"
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => {
-            const linkUrl = window.prompt('Link URL');
+            const linkUrl = window.prompt(copy.richTextPromptLinkUrl);
             if (linkUrl?.trim()) {
               executeCommand('createLink', linkUrl.trim());
             }
           }}
-          title="Link (Ctrl+K)"
+          title={copy.richTextLinkTitle}
         >
-          Link
+          {copy.richTextLinkButtonLabel}
         </button>
-        <label className="rich-text-color-label" title="Textfarbe">
+        <label className="rich-text-color-label" title={copy.richTextTextColorTitle}>
           A
           <input
             type="color"
@@ -403,10 +435,10 @@ export const RichTextEditor = ({
             onPointerDown={() => saveSelection()}
             onMouseDown={() => saveSelection()}
             onChange={(event) => executeColorCommand('foreColor', event.target.value)}
-            aria-label="Textfarbe"
+            aria-label={copy.richTextTextColorAria}
           />
         </label>
-        <label className="rich-text-color-label" title="Highlight">
+        <label className="rich-text-color-label" title={copy.richTextHighlightTitle}>
           H
           <input
             type="color"
@@ -415,11 +447,11 @@ export const RichTextEditor = ({
             onPointerDown={() => saveSelection()}
             onMouseDown={() => saveSelection()}
             onChange={(event) => executeColorCommand('hiliteColor', event.target.value)}
-            aria-label="Highlight"
+            aria-label={copy.richTextHighlightAria}
           />
         </label>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('undo')} title="Rückgängig (Ctrl+Z)">↶</button>
-        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('redo')} title="Wiederholen (Ctrl+Y)">↷</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('undo')} title={copy.richTextUndoTitle}>↶</button>
+        <button type="button" className="rich-text-btn" onMouseDown={(event) => event.preventDefault()} onClick={() => executeCommand('redo')} title={copy.richTextRedoTitle}>↷</button>
       </div>
       <div
         ref={editorRef}

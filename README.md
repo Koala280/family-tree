@@ -45,7 +45,7 @@ Family Tree App is built for people who want a modern family tree tool without c
 | Person data | Names, gender, dates, notes, profile photos, diseases, and cause of death. |
 | Smart suggestions | Last-name suggestions from related persons and disease suggestion helpers. |
 | Search and navigation | Search inside the tree and jump to matching persons. |
-| Multi-language UI | German (`DE`), English (`EN`), Latvian (`LV`). |
+| Multi-language UI | German (`DE`), English (`EN`), Latvian (`LV`) plus custom language JSON import via `Custom`. |
 | PWA support | Install prompt, offline shell caching, and share target/file handling. |
 | Secure export/import | Encrypted JSON export/import with Web Crypto (AES-GCM + PBKDF2). |
 
@@ -83,33 +83,17 @@ pnpm preview
 
 ## Data, Privacy, and Security
 
-- Data is stored in browser `localStorage`.
+- Tree data is stored encrypted in browser storage.
 - No mandatory backend account is required for core usage.
 - Export files can be password-protected before sharing.
-- Encryption uses modern browser Web Crypto primitives (AES-GCM with PBKDF2 key derivation).
+- Rich-text notes are sanitized before persistence to reduce XSS risk.
 - For vulnerability reports, see `SECURITY.md`.
-
-## Deployment
-
-This project is set up for Firebase Hosting.
-
-```bash
-pnpm build
-firebase deploy --only hosting
-```
-
-First-time Firebase setup:
-
-1. Install Firebase CLI: `pnpm add -g firebase-tools`
-2. Authenticate: `firebase login`
-3. Select project: `firebase use --add`
 
 ## Tech Stack
 
 - React 19
 - TypeScript
 - Vite
-- Firebase Hosting
 
 ## Contributing and Community
 

@@ -47,3 +47,13 @@ pnpm-debug.log*
 *.swo
 .DS_Store
 Thumbs.db
+firebase.json
+*.cache
+*.log
+*.bak
+*.tmp
+*.pid
+*.seed
+*.pid.lock
+.firebase/
+firebase.json

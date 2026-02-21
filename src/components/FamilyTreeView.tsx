@@ -197,6 +197,21 @@ export const FamilyTreeView = () => {
   }, []);
 
   const isTreeOverlayOpen = Boolean(selectedPersonId || editingPersonId || linkMenuState);
+  const backButtonLabel = isTreeOverlayOpen ? copy.backToTree : copy.backToOverview;
+
+  const closeTreeOverlay = useCallback(() => {
+    setSelectedPersonId(null);
+    setEditingPersonId(null);
+    setLinkMenuState(null);
+  }, []);
+
+  const handleHeaderBackClick = useCallback(() => {
+    if (isTreeOverlayOpen) {
+      closeTreeOverlay();
+      return;
+    }
+    setCurrentView('manager');
+  }, [isTreeOverlayOpen, closeTreeOverlay, setCurrentView]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -244,9 +259,7 @@ export const FamilyTreeView = () => {
 
       if (!hasOverlayState && (selectedPersonId || editingPersonId || linkMenuState)) {
         isHandlingOverlayPopRef.current = true;
-        setSelectedPersonId(null);
-        setEditingPersonId(null);
-        setLinkMenuState(null);
+        closeTreeOverlay();
       }
     };
 
@@ -254,7 +267,7 @@ export const FamilyTreeView = () => {
     return () => {
       window.removeEventListener('popstate', handlePopState);
     };
-  }, [selectedPersonId, editingPersonId, linkMenuState]);
+  }, [selectedPersonId, editingPersonId, linkMenuState, closeTreeOverlay]);
 
   if (!familyTree) {
     return (
@@ -3320,7 +3333,7 @@ export const FamilyTreeView = () => {
   return (
     <div className="family-tree-view" ref={viewRef}>
       <div className="family-tree-header">
-        <button className="back-to-manager-button" onClick={() => setCurrentView('manager')} title={copy.backToOverview} aria-label={copy.backToOverview}>
+        <button className="back-to-manager-button" onClick={handleHeaderBackClick} title={backButtonLabel} aria-label={backButtonLabel}>
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
           </svg>
@@ -3328,7 +3341,7 @@ export const FamilyTreeView = () => {
         <div className="family-tree-header-content">
           <h1>{activeTreeId ? allTrees[activeTreeId]?.name : copy.defaultTreeTitle}</h1>
           <div className="family-tree-stats">
-            {allPersons.length} {allPersons.length === 1 ? 'Person' : 'Personen'}
+            {allPersons.length} {allPersons.length === 1 ? copy.personLabelSingular : copy.personLabelPlural}
           </div>
         </div>
       </div>
@@ -3404,7 +3417,7 @@ export const FamilyTreeView = () => {
                 setExpandedPersons(new Set([person.id]));
               }}
             >
-              {person.firstName || 'Unbenannt'}
+              {person.firstName || copy.unnamedPerson}
             </div>
           ))}
         </div>

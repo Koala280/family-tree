@@ -30,6 +30,7 @@ export interface Person {
   firstName?: string;
   lastName?: string;
   lastNames?: string[];
+  bloodGroup?: string;
   gender: Gender;
   birthDate: DateInfo;
   deathDate: DateInfo;

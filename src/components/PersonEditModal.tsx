@@ -2,7 +2,15 @@ import { useRef, useMemo, useState } from 'react';
 import { Person } from '../types';
 import { useFamilyTree } from '../context/FamilyTreeContext';
 import { translations } from '../i18n';
-import { getLastNameList, getKnownDiseaseEntries, getKnownDiseaseList, getInheritedHereditaryDiseaseRisks } from '../utils/person';
+import {
+  BLOOD_GROUP_OPTIONS,
+  getBloodGroup,
+  getLastNameList,
+  getKnownDiseaseEntries,
+  getKnownDiseaseList,
+  getInheritedHereditaryDiseaseRisks,
+  getParentBloodGroupInfo,
+} from '../utils/person';
 import { DateField, normalizeDateInputOnBlur, sanitizeDateInput } from '../utils/dateInput';
 import { normalizeInlineTextOnCommit } from '../utils/textInput';
 import { RichTextEditor } from './RichTextEditor';
@@ -119,6 +127,18 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
     if (!familyTree) return [];
     return getInheritedHereditaryDiseaseRisks(familyTree, person.id);
   }, [familyTree, person.id]);
+  const parentBloodGroupInfo = useMemo(() => {
+    if (!familyTree) {
+      return {
+        parentGroups: [] as string[],
+        suggestions: [] as string[],
+      };
+    }
+    return getParentBloodGroupInfo(familyTree, person.id);
+  }, [familyTree, person.id]);
+  const currentBloodGroup = getBloodGroup(person);
+  const suggestedBloodGroups = parentBloodGroupInfo.suggestions.filter(group => group !== currentBloodGroup);
+  const hasSuggestedBloodGroups = suggestedBloodGroups.length > 0;
 
   const handleInputChange = (field: keyof Person, value: unknown) => {
     updatePerson(person.id, { [field]: value });
@@ -279,6 +299,34 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
     updatePerson(person.id, { knownDiseases: [...knownDiseaseInputs, { name: trimmed, hereditary: false }] });
   };
 
+  const applyInheritedRiskSuggestion = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const normalized = normalizeKnownDisease(trimmed);
+    const existingIndex = knownDiseaseInputs.findIndex(
+      (entry) => normalizeKnownDisease(entry.name) === normalized
+    );
+
+    if (existingIndex >= 0) {
+      if (knownDiseaseInputs[existingIndex].hereditary === true) return;
+      const next = [...knownDiseaseInputs];
+      next[existingIndex] = { ...next[existingIndex], hereditary: true };
+      updatePerson(person.id, { knownDiseases: next });
+      return;
+    }
+
+    const firstEmptyIndex = knownDiseaseInputs.findIndex(entry => !entry.name.trim());
+    if (firstEmptyIndex >= 0) {
+      const next = [...knownDiseaseInputs];
+      next[firstEmptyIndex] = { ...next[firstEmptyIndex], name: trimmed, hereditary: true };
+      updatePerson(person.id, { knownDiseases: next });
+      return;
+    }
+
+    updatePerson(person.id, { knownDiseases: [...knownDiseaseInputs, { name: trimmed, hereditary: true }] });
+  };
+
   const getMatchingKnownDiseases = (value: string) => {
     const normalized = normalizeKnownDisease(value);
     if (!normalized) return [];
@@ -297,6 +345,10 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
 
   const handleCauseOfDeathBlur = (value: string) => {
     handleInputChange('causeOfDeath', normalizeInlineTextOnCommit(value));
+  };
+
+  const handleBloodGroupChange = (value: string) => {
+    handleInputChange('bloodGroup', value);
   };
 
   const getMatchingCausesOfDeath = (value: string) => {
@@ -597,6 +649,25 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
           <div className="form-group person-known-disease-group">
             <label>{copy.knownDiseases}</label>
             <div className="last-name-list">
+              <div className="last-name-suggestions">
+                <span className="last-name-suggestions-label">{copy.potentialHereditaryRisks}</span>
+                {inheritedDiseaseRisks.length > 0 ? (
+                  <div className="last-name-suggestions-list">
+                    {inheritedDiseaseRisks.map(disease => (
+                      <button
+                        key={`risk-suggestion-${person.id}-${disease}`}
+                        type="button"
+                        className="last-name-suggestion"
+                        onClick={() => applyInheritedRiskSuggestion(disease)}
+                      >
+                        {disease}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="hereditary-risk-empty">{copy.potentialHereditaryRisksEmpty}</div>
+                )}
+              </div>
               {knownDiseaseInputs.map((entry, index) => (
                 <div key={`known-disease-${person.id}-${index}`} className="last-name-row known-disease-row">
                   <div className="last-name-input-wrapper">
@@ -671,6 +742,44 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
           </div>
 
           <div className="form-group">
+            <label>{copy.bloodGroupLabel}</label>
+            {hasSuggestedBloodGroups && (
+              <div className="last-name-suggestions blood-group-suggestions">
+                <span className="last-name-suggestions-label">
+                  {copy.bloodGroupSuggestionsLabel}
+                  {parentBloodGroupInfo.parentGroups.length >= 2
+                    ? `: ${parentBloodGroupInfo.parentGroups[0]} x ${parentBloodGroupInfo.parentGroups[1]}`
+                    : ''}
+                </span>
+                <div className="last-name-suggestions-list">
+                  {suggestedBloodGroups.map(group => (
+                    <button
+                      key={`blood-group-suggestion-${person.id}-${group}`}
+                      type="button"
+                      className="last-name-suggestion"
+                      onClick={() => handleBloodGroupChange(group)}
+                    >
+                      {group}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <select
+              className="blood-group-select"
+              value={currentBloodGroup}
+              onChange={(event) => handleBloodGroupChange(event.target.value)}
+            >
+              <option value="">{copy.bloodGroupPlaceholder}</option>
+              {BLOOD_GROUP_OPTIONS.map(group => (
+                <option key={`blood-group-option-${group}`} value={group}>
+                  {group}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
             <label>{copy.causeOfDeath}</label>
             <div className="last-name-input-wrapper">
               {(() => {
@@ -715,21 +824,6 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                 );
               })()}
             </div>
-          </div>
-
-          <div className="form-group">
-            <label>{copy.potentialHereditaryRisks}</label>
-            {inheritedDiseaseRisks.length > 0 ? (
-              <div className="hereditary-risk-list">
-                {inheritedDiseaseRisks.map(disease => (
-                  <span key={`risk-${person.id}-${disease}`} className="hereditary-risk-chip">
-                    {disease}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <div className="hereditary-risk-empty">{copy.potentialHereditaryRisksEmpty}</div>
-            )}
           </div>
 
           <div className="form-group">

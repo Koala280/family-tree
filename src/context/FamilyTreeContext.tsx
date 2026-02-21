@@ -1,7 +1,16 @@
 import { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
 import { Person, FamilyTree, FamilyTreesData, FamilyTreeMetadata, Union, UnionStatus, KnownDiseaseEntry } from '../types';
 import { PasswordModal } from '../components/PasswordModal';
-import { translations, isLanguageCode, type LanguageCode } from '../i18n';
+import {
+  translations,
+  isLanguageCode,
+  parseCustomTranslations,
+  applyCustomTranslations,
+  resetCustomTranslations,
+  type LanguageCode,
+} from '../i18n';
+import { normalizeRichTextForStorage } from '../utils/richText';
+import { normalizeBloodGroup } from '../utils/person';
 
 type AppView = 'manager' | 'tree' | 'table';
 const HISTORY_VIEW_KEY = '__family_tree_view';
@@ -52,22 +61,35 @@ interface FamilyTreeContextType {
   deleteTree: (treeId: string) => void;
   exportTree: (treeId: string) => void;
   importTree: () => void;
+  importTreeFile: (file: File) => Promise<boolean>;
   openTableView: (treeId: string) => void;
 
   // UI language
   language: LanguageCode;
+  hasCustomLanguagePack: boolean;
   setLanguage: (language: LanguageCode) => void;
+  importCustomLanguage: () => void;
 }
 
 const FamilyTreeContext = createContext<FamilyTreeContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'family-trees-data';
 const LANGUAGE_KEY = 'family-tree-language';
+const CUSTOM_TRANSLATIONS_KEY = 'family-tree-custom-translations';
+const CUSTOM_TRANSLATION_IMPORT_ERROR = 'Failed to import language file. Please provide a valid JSON translation file.';
 const ENCRYPTION_VERSION = 1;
 const ENCRYPTION_ITERATIONS = 310000;
 const ENCRYPTION_SALT_BYTES = 16;
 const ENCRYPTION_IV_BYTES = 12;
 const ENCRYPTION_TYPE = 'family-tree-export';
+const LOCAL_STORAGE_ENCRYPTION_VERSION = 1;
+const LOCAL_STORAGE_ENCRYPTION_TYPE = 'family-tree-local-storage';
+const LOCAL_STORAGE_KEY_DB = 'family-tree-secure-storage';
+const LOCAL_STORAGE_KEY_STORE = 'keys';
+const LOCAL_STORAGE_KEY_ID = 'local-storage-key';
+const APP_DATA_DB = 'family-tree-secure-data';
+const APP_DATA_STORE = 'state';
+const APP_DATA_KEY_ID = 'trees-data';
 const INLINE_WHITESPACE_PATTERN = /[ \t\f\v\u00a0]+/g;
 
 type PasswordModalState = {
@@ -76,6 +98,288 @@ type PasswordModalState = {
   confirmLabel: string;
   requireConfirm: boolean;
   minLength: number;
+};
+
+type LocalStorageEncryptionPayload = {
+  version: number;
+  type: string;
+  cipher: {
+    name: 'AES-GCM';
+    iv: string;
+  };
+  ciphertext: string;
+};
+
+type StorageLoadResult = {
+  data: FamilyTreesData;
+  shouldPersist: boolean;
+};
+
+const createEmptyTreesData = (): FamilyTreesData => ({
+  trees: {},
+  metadata: {},
+  activeTreeId: null,
+});
+
+const normalizeStoredTreesData = (value: unknown): FamilyTreesData | null => {
+  if (!value || typeof value !== 'object') return null;
+
+  const candidate = value as Partial<FamilyTreesData>;
+  if (!candidate.trees || typeof candidate.trees !== 'object') return null;
+  if (!candidate.metadata || typeof candidate.metadata !== 'object') return null;
+
+  return {
+    trees: candidate.trees as Record<string, FamilyTree>,
+    metadata: candidate.metadata as Record<string, FamilyTreeMetadata>,
+    activeTreeId: typeof candidate.activeTreeId === 'string' ? candidate.activeTreeId : null,
+  };
+};
+
+const isLocalStorageEncryptionPayload = (
+  value: unknown
+): value is LocalStorageEncryptionPayload => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<LocalStorageEncryptionPayload>;
+
+  return Boolean(
+    candidate.type === LOCAL_STORAGE_ENCRYPTION_TYPE
+    && typeof candidate.version === 'number'
+    && candidate.cipher
+    && typeof candidate.cipher.iv === 'string'
+    && typeof candidate.ciphertext === 'string'
+  );
+};
+
+const openLocalStorageKeyDatabase = () => (
+  new Promise<IDBDatabase>((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB is unavailable.'));
+      return;
+    }
+
+    const request = indexedDB.open(LOCAL_STORAGE_KEY_DB, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(LOCAL_STORAGE_KEY_STORE)) {
+        database.createObjectStore(LOCAL_STORAGE_KEY_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('Failed to open key database.'));
+  })
+);
+
+const readLocalStorageEncryptionKey = async (): Promise<CryptoKey | null> => {
+  const database = await openLocalStorageKeyDatabase();
+
+  try {
+    return await new Promise<CryptoKey | null>((resolve, reject) => {
+      const transaction = database.transaction(LOCAL_STORAGE_KEY_STORE, 'readonly');
+      const request = transaction.objectStore(LOCAL_STORAGE_KEY_STORE).get(LOCAL_STORAGE_KEY_ID);
+
+      request.onsuccess = () => {
+        const result = request.result;
+        if (result && typeof result === 'object' && 'type' in result && 'algorithm' in result) {
+          resolve(result as CryptoKey);
+          return;
+        }
+        resolve(null);
+      };
+      request.onerror = () => reject(request.error ?? new Error('Failed to read key.'));
+    });
+  } finally {
+    database.close();
+  }
+};
+
+const writeLocalStorageEncryptionKey = async (key: CryptoKey) => {
+  const database = await openLocalStorageKeyDatabase();
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(LOCAL_STORAGE_KEY_STORE, 'readwrite');
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error('Failed to persist key.'));
+      transaction.objectStore(LOCAL_STORAGE_KEY_STORE).put(key, LOCAL_STORAGE_KEY_ID);
+    });
+  } finally {
+    database.close();
+  }
+};
+
+const openAppDataDatabase = () => (
+  new Promise<IDBDatabase>((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB is unavailable.'));
+      return;
+    }
+
+    const request = indexedDB.open(APP_DATA_DB, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(APP_DATA_STORE)) {
+        database.createObjectStore(APP_DATA_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('Failed to open app data database.'));
+  })
+);
+
+const readAppDataPayload = async (): Promise<unknown | null> => {
+  const database = await openAppDataDatabase();
+
+  try {
+    return await new Promise<unknown | null>((resolve, reject) => {
+      const transaction = database.transaction(APP_DATA_STORE, 'readonly');
+      const request = transaction.objectStore(APP_DATA_STORE).get(APP_DATA_KEY_ID);
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error ?? new Error('Failed to read app data payload.'));
+    });
+  } finally {
+    database.close();
+  }
+};
+
+const writeAppDataPayload = async (payload: LocalStorageEncryptionPayload) => {
+  const database = await openAppDataDatabase();
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(APP_DATA_STORE, 'readwrite');
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error('Failed to persist app data payload.'));
+      transaction.objectStore(APP_DATA_STORE).put(payload, APP_DATA_KEY_ID);
+    });
+  } finally {
+    database.close();
+  }
+};
+
+const getOrCreateLocalStorageEncryptionKey = async () => {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('Web Crypto is unavailable.');
+  }
+
+  const storedKey = await readLocalStorageEncryptionKey();
+  if (storedKey) return storedKey;
+
+  const generatedKey = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+
+  await writeLocalStorageEncryptionKey(generatedKey);
+  return generatedKey;
+};
+
+const encryptTreesDataForStorage = async (data: FamilyTreesData): Promise<LocalStorageEncryptionPayload> => {
+  const key = await getOrCreateLocalStorageEncryptionKey();
+  const iv = crypto.getRandomValues(new Uint8Array(ENCRYPTION_IV_BYTES));
+  const encoder = new TextEncoder();
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    encoder.encode(JSON.stringify(data))
+  );
+
+  return {
+    version: LOCAL_STORAGE_ENCRYPTION_VERSION,
+    type: LOCAL_STORAGE_ENCRYPTION_TYPE,
+    cipher: {
+      name: 'AES-GCM',
+      iv: encodeBase64(iv),
+    },
+    ciphertext: encodeBase64(new Uint8Array(ciphertext)),
+  };
+};
+
+const decryptTreesDataFromStorage = async (payload: LocalStorageEncryptionPayload): Promise<FamilyTreesData> => {
+  if (payload.version !== LOCAL_STORAGE_ENCRYPTION_VERSION || payload.type !== LOCAL_STORAGE_ENCRYPTION_TYPE) {
+    throw new Error('Unsupported local storage payload.');
+  }
+
+  const key = await getOrCreateLocalStorageEncryptionKey();
+  const iv = decodeBase64(payload.cipher.iv);
+  const ciphertext = decodeBase64(payload.ciphertext);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    ciphertext
+  );
+  const decoder = new TextDecoder();
+  const parsed = JSON.parse(decoder.decode(plaintext));
+  const normalized = normalizeStoredTreesData(parsed);
+
+  if (!normalized) {
+    throw new Error('Invalid local storage payload.');
+  }
+
+  return normalized;
+};
+
+const loadTreesDataFromStorage = async (): Promise<StorageLoadResult> => {
+  try {
+    const idbPayload = await readAppDataPayload();
+    if (idbPayload) {
+      if (isLocalStorageEncryptionPayload(idbPayload)) {
+        return {
+          data: await decryptTreesDataFromStorage(idbPayload),
+          shouldPersist: false,
+        };
+      }
+
+      const plaintextIdbData = normalizeStoredTreesData(idbPayload);
+      if (plaintextIdbData) {
+        return {
+          data: plaintextIdbData,
+          shouldPersist: true,
+        };
+      }
+    }
+  } catch {
+    // Continue with legacy localStorage fallback if IndexedDB is unavailable.
+  }
+
+  const legacyLocalStorage = localStorage.getItem(STORAGE_KEY);
+  if (legacyLocalStorage) {
+    try {
+      const parsed = JSON.parse(legacyLocalStorage);
+      if (isLocalStorageEncryptionPayload(parsed)) {
+        return {
+          data: await decryptTreesDataFromStorage(parsed),
+          shouldPersist: true,
+        };
+      }
+
+      const plaintextData = normalizeStoredTreesData(parsed);
+      if (plaintextData) {
+        return {
+          data: plaintextData,
+          shouldPersist: true,
+        };
+      }
+    } catch {
+      // Ignore malformed storage content and start with an empty tree set.
+    }
+  }
+
+  return {
+    data: createEmptyTreesData(),
+    shouldPersist: false,
+  };
+};
+
+const persistTreesDataToStorage = async (data: FamilyTreesData) => {
+  const encrypted = await encryptTreesDataForStorage(data);
+  try {
+    await writeAppDataPayload(encrypted);
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  } catch {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(encrypted));
+  }
 };
 
 const createId = () => {
@@ -221,6 +525,7 @@ const createEmptyPerson = (): Person => ({
   firstName: '',
   lastName: '',
   lastNames: [],
+  bloodGroup: '',
   gender: null,
   birthDate: {},
   deathDate: {},
@@ -264,12 +569,13 @@ const normalizeTree = (tree: any): FamilyTree => {
       firstName: normalizeInlineText(person.firstName ?? ''),
       lastName: primaryLastName,
       lastNames: normalizedLastNames,
+      bloodGroup: normalizeBloodGroup(person.bloodGroup),
       gender: person.gender ?? null,
       birthDate: person.birthDate ?? {},
       deathDate: person.deathDate ?? {},
       causeOfDeath: normalizeInlineText(person.causeOfDeath ?? ''),
       knownDiseases: normalizeKnownDiseases(person.knownDiseases),
-      notes: normalizeMultilineText(person.notes ?? ''),
+      notes: normalizeRichTextForStorage(normalizeMultilineText(person.notes ?? '')),
       photo: person.photo,
       parentUnionId: person.parentUnionId ?? null,
       unionIds: [],
@@ -298,24 +604,11 @@ const normalizeTree = (tree: any): FamilyTree => {
 };
 
 export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
-  const [treesData, setTreesData] = useState<FamilyTreesData>(() => {
-    // Try to load from new storage format
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-
-      if (parsed.trees) {
-        return parsed;
-      }
-    }
-
-    // No existing data - create initial empty state
-    return {
-      trees: {},
-      metadata: {},
-      activeTreeId: null,
-    };
-  });
+  const [treesData, setTreesData] = useState<FamilyTreesData>(createEmptyTreesData);
+  const [isStorageHydrated, setIsStorageHydrated] = useState(false);
+  const [shouldPersistHydratedData, setShouldPersistHydratedData] = useState(false);
+  const [hasCustomLanguagePack, setHasCustomLanguagePack] = useState(false);
+  const [, setCustomTranslationRevision] = useState(0);
 
   const [currentView, setCurrentViewState] = useState<AppView>(() => {
     return treesData.activeTreeId ? 'tree' : 'manager';
@@ -333,6 +626,7 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
   const [passwordModal, setPasswordModal] = useState<PasswordModalState | null>(null);
   const passwordResolverRef = useRef<((value: string | null) => void) | null>(null);
   const hasPrimedHistoryRef = useRef(false);
+  const skipInitialStoragePersistRef = useRef(true);
   const copy = translations[language];
 
   const setCurrentView = (view: AppView) => {
@@ -392,16 +686,64 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
   };
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(treesData));
-  }, [treesData]);
+    let isCancelled = false;
+
+    const hydrateStorage = async () => {
+      const result = await loadTreesDataFromStorage();
+      if (isCancelled) return;
+
+      setTreesData(result.data);
+      setShouldPersistHydratedData(result.shouldPersist);
+      setCurrentViewState(result.data.activeTreeId ? 'tree' : 'manager');
+      setIsStorageHydrated(true);
+    };
+
+    void hydrateStorage();
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isStorageHydrated) return;
+    if (skipInitialStoragePersistRef.current) {
+      skipInitialStoragePersistRef.current = false;
+      if (!shouldPersistHydratedData) return;
+    }
+
+    void persistTreesDataToStorage(treesData).catch(() => {
+      // Keep the app usable even if encrypted persistence fails in this environment.
+    });
+  }, [treesData, isStorageHydrated, shouldPersistHydratedData]);
+
+  useEffect(() => {
+    const storedCustomTranslations = localStorage.getItem(CUSTOM_TRANSLATIONS_KEY);
+    if (!storedCustomTranslations) {
+      resetCustomTranslations();
+      setHasCustomLanguagePack(false);
+      return;
+    }
+
+    const parsedCustomTranslations = parseCustomTranslations(storedCustomTranslations);
+    if (!parsedCustomTranslations) {
+      localStorage.removeItem(CUSTOM_TRANSLATIONS_KEY);
+      resetCustomTranslations();
+      setHasCustomLanguagePack(false);
+      return;
+    }
+
+    applyCustomTranslations(parsedCustomTranslations.bundle);
+    setHasCustomLanguagePack(true);
+    setCustomTranslationRevision((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(LANGUAGE_KEY, language);
-    document.documentElement.lang = language;
+    document.documentElement.lang = language === 'custom' ? 'en' : language;
   }, [language]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || hasPrimedHistoryRef.current) return;
+    if (typeof window === 'undefined' || hasPrimedHistoryRef.current || !isStorageHydrated) return;
 
     const existing = window.history.state;
     const existingState = existing && typeof existing === 'object'
@@ -434,7 +776,7 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
         ''
       );
     }
-  }, [currentView]);
+  }, [currentView, isStorageHydrated]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -486,8 +828,9 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     if (!newPerson.lastName) {
       newPerson.lastName = newPerson.lastNames.find(name => name.trim().length > 0) ?? '';
     }
+    newPerson.bloodGroup = normalizeBloodGroup(newPerson.bloodGroup);
     newPerson.causeOfDeath = normalizeInlineText(newPerson.causeOfDeath);
-    newPerson.notes = normalizeMultilineText(newPerson.notes);
+    newPerson.notes = normalizeRichTextForStorage(normalizeMultilineText(newPerson.notes));
     if (Array.isArray(newPerson.lastNames) && !newPerson.lastName) {
       newPerson.lastName = newPerson.lastNames.find(name => name.trim().length > 0) ?? '';
     }
@@ -517,6 +860,12 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     }
     if (updates.knownDiseases !== undefined) {
       nextUpdates.knownDiseases = normalizeKnownDiseases(updates.knownDiseases);
+    }
+    if (updates.bloodGroup !== undefined) {
+      nextUpdates.bloodGroup = normalizeBloodGroup(updates.bloodGroup);
+    }
+    if (updates.notes !== undefined) {
+      nextUpdates.notes = normalizeRichTextForStorage(normalizeMultilineText(updates.notes));
     }
     updateCurrentTree(tree => ({
       ...tree,
@@ -1156,6 +1505,56 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
     input.click();
   };
 
+  const importTreeFile = useCallback((file: File) => {
+    return importTreeFromFile(file);
+  }, [importTreeFromFile]);
+
+  const importCustomLanguageFromRawText = useCallback(async (rawText: string) => {
+    const parsedCustomTranslations = parseCustomTranslations(rawText);
+    if (!parsedCustomTranslations) {
+      alert(CUSTOM_TRANSLATION_IMPORT_ERROR);
+      return false;
+    }
+
+    applyCustomTranslations(parsedCustomTranslations.bundle);
+    localStorage.setItem(CUSTOM_TRANSLATIONS_KEY, parsedCustomTranslations.serialized);
+    setHasCustomLanguagePack(true);
+    setCustomTranslationRevision((value) => value + 1);
+    setLanguage('custom');
+    return true;
+  }, []);
+
+  const importCustomLanguageFromFile = useCallback(async (file: File) => {
+    try {
+      const rawText = await file.text();
+      return importCustomLanguageFromRawText(rawText);
+    } catch {
+      alert(CUSTOM_TRANSLATION_IMPORT_ERROR);
+      return false;
+    }
+  }, [importCustomLanguageFromRawText]);
+
+  const importCustomLanguage = useCallback(() => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    const cleanup = () => {
+      input.value = '';
+      input.remove();
+    };
+    input.onchange = (event: Event) => {
+      const target = event.target as HTMLInputElement | null;
+      const file = target?.files?.[0];
+      if (file) {
+        void importCustomLanguageFromFile(file);
+      }
+      cleanup();
+    };
+    input.click();
+  }, [importCustomLanguageFromFile]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -1226,8 +1625,11 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
         deleteTree,
         exportTree,
         importTree,
+        importTreeFile,
         language,
+        hasCustomLanguagePack,
         setLanguage,
+        importCustomLanguage,
       }}
     >
       {children}

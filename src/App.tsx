@@ -5,7 +5,19 @@ import { FamilyTableView } from './components/FamilyTableView'
 import './App.css'
 
 function AppContent() {
-  const { currentView, allTrees, activeTreeId, createTree, selectTree, renameTree, deleteTree, exportTree, importTree, openTableView } = useFamilyTree();
+  const {
+    currentView,
+    allTrees,
+    activeTreeId,
+    createTree,
+    selectTree,
+    renameTree,
+    deleteTree,
+    exportTree,
+    importTree,
+    importTreeFile,
+    openTableView,
+  } = useFamilyTree();
 
   if (currentView === 'manager') {
     return (
@@ -18,6 +30,7 @@ function AppContent() {
         onDeleteTree={deleteTree}
         onExportTree={exportTree}
         onImportTree={importTree}
+        onImportTreeFile={importTreeFile}
         onOpenTable={openTableView}
       />
     );

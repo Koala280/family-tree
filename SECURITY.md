@@ -1,8 +1,10 @@
 # Security Policy
 
-## Supported Versions
+## Threat Model Notes
 
-Only the latest `main` branch is currently supported with security fixes.
+- Data at rest is encrypted in browser storage.
+- The app includes client-side hardening (sanitized rich text + strict security headers) to reduce script-injection risk.
+- A fully compromised device/browser profile can still bypass client-side controls. No pure browser app can guarantee protection against privileged malware.
 
 ## Reporting a Vulnerability
 
@@ -18,5 +20,8 @@ Please include:
 - Potential impact
 - Suggested remediation (if known)
 
-We will acknowledge reports as soon as possible and work on a fix.
+Reports will be acknowledged as soon as possible and worked on promptly.
 
+## Supported Versions
+
+Only the latest `main` branch is currently supported with security fixes.
