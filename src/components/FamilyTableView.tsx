@@ -23,7 +23,7 @@ type GenderFilter = 'male' | 'female' | 'unknown';
 type SortKey = 'firstName' | 'lastNames' | 'gender' | 'bloodGroup' | 'birthDate' | 'deathDate' | 'causeOfDeath' | 'knownDiseases' | 'notes';
 type DateFilterMode = 'all' | 'year' | 'yearRange' | 'dateRange';
 type PersonDateType = 'birthDate' | 'deathDate';
-type BloodGroupFilter = 'all' | 'unknown' | BloodGroupValue;
+type BloodGroupFilter = 'unknown' | BloodGroupValue;
 
 type DateFilterState = {
   mode: DateFilterMode;
@@ -447,7 +447,7 @@ export const FamilyTableView = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [genderFilters, setGenderFilters] = useState<GenderFilter[]>([]);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [bloodGroupFilter, setBloodGroupFilter] = useState<BloodGroupFilter>('all');
+  const [bloodGroupFilters, setBloodGroupFilters] = useState<BloodGroupFilter[]>([]);
   const [birthDateFilter, setBirthDateFilter] = useState<DateFilterState>(createEmptyDateFilter);
   const [deathDateFilter, setDeathDateFilter] = useState<DateFilterState>(createEmptyDateFilter);
   const [activeLastNameField, setActiveLastNameField] = useState<{ personId: string; index: number } | null>(null);
@@ -978,7 +978,7 @@ export const FamilyTableView = () => {
 
   const getCompactDateLabel = (date: Person['birthDate']) => {
     const formatted = formatDateInfo(date).trim();
-    return formatted.length > 0 ? formatted : '-';
+    return formatted;
   };
 
   const getAgeYears = (person: Person) => {
@@ -1096,13 +1096,11 @@ export const FamilyTableView = () => {
         const status = getStatus(person);
         if (statusFilter !== status) return false;
       }
-      if (bloodGroupFilter !== 'all') {
+      if (bloodGroupFilters.length > 0) {
         const personBloodGroup = getBloodGroup(person);
-        if (bloodGroupFilter === 'unknown') {
-          if (personBloodGroup) return false;
-        } else if (personBloodGroup !== bloodGroupFilter) {
-          return false;
-        }
+        if (personBloodGroup) {
+          if (!bloodGroupFilters.includes(personBloodGroup)) return false;
+        } else if (!bloodGroupFilters.includes('unknown')) return false;
       }
       if (normalizedSelectedKnownDiseases.length > 0) {
         const personKnownDiseaseSet = new Set(
@@ -1133,7 +1131,7 @@ export const FamilyTableView = () => {
     }
 
     return filtered;
-  }, [familyTree.persons, genderFilters, searchTerm, sortConfig, statusFilter, bloodGroupFilter, birthDateFilter, deathDateFilter, inheritedRiskByPersonId, selectedKnownDiseases]);
+  }, [familyTree.persons, genderFilters, searchTerm, sortConfig, statusFilter, bloodGroupFilters, birthDateFilter, deathDateFilter, inheritedRiskByPersonId, selectedKnownDiseases]);
 
   useEffect(() => {
     if (!expandedMobilePersonId) return;
@@ -1174,11 +1172,20 @@ export const FamilyTableView = () => {
     { value: 'unknown', label: copy.filterStatusUnknown },
   ];
   const bloodGroupFilterOptions: { value: BloodGroupFilter; label: string }[] = [
-    { value: 'all', label: copy.filterAll },
     ...BLOOD_GROUP_OPTIONS.map(group => ({ value: group, label: group })),
     { value: 'unknown', label: copy.filterUnknown },
   ];
-  const selectedBloodGroupLabel = bloodGroupFilterOptions.find(option => option.value === bloodGroupFilter)?.label ?? copy.filterAll;
+  const getBloodGroupFilterLabel = (value: BloodGroupFilter) => (
+    value === 'unknown' ? copy.filterUnknown : value
+  );
+  const selectedBloodGroupLabel = bloodGroupFilters.length === 0
+    ? copy.filterAll
+    : bloodGroupFilters.length === 1
+      ? getBloodGroupFilterLabel(bloodGroupFilters[0])
+      : `${getBloodGroupFilterLabel(bloodGroupFilters[0])} +${bloodGroupFilters.length - 1}`;
+  const selectedBloodGroupTitle = bloodGroupFilters.length === 0
+    ? copy.filterAll
+    : bloodGroupFilters.map(getBloodGroupFilterLabel).join(', ');
   const selectedStatusLabel = statusOptions.find(option => option.value === statusFilter)?.label ?? copy.filterAll;
   const selectedKnownDiseaseLabel = selectedKnownDiseases.length === 0
     ? copy.filterAll
@@ -1351,6 +1358,7 @@ export const FamilyTableView = () => {
                 aria-haspopup="listbox"
                 aria-expanded={isBloodGroupDropdownOpen}
                 aria-label={copy.filterBloodGroupLabel}
+                title={selectedBloodGroupTitle}
               >
                 <span>{selectedBloodGroupLabel}</span>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1358,28 +1366,58 @@ export const FamilyTableView = () => {
                 </svg>
               </button>
               {isBloodGroupDropdownOpen && (
-                <div className="table-status-menu" role="listbox" aria-label={copy.filterBloodGroupLabel}>
-                  {bloodGroupFilterOptions.map(option => (
-                    <button
-                      key={`blood-group-filter-${option.value}`}
-                      type="button"
-                      className={`table-status-option ${bloodGroupFilter === option.value ? 'active' : ''}`}
-                      role="option"
-                      aria-selected={bloodGroupFilter === option.value}
-                      onPointerDown={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        setBloodGroupFilter(option.value);
-                        setIsBloodGroupDropdownOpen(false);
-                      }}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
+                <div
+                  className="table-status-menu table-bloodgroup-filter-menu"
+                  role="listbox"
+                  aria-label={copy.filterBloodGroupLabel}
+                  aria-multiselectable="true"
+                >
+                  <button
+                    type="button"
+                    className={`table-status-option table-disease-option ${bloodGroupFilters.length === 0 ? 'active' : ''}`}
+                    role="option"
+                    aria-selected={bloodGroupFilters.length === 0}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setBloodGroupFilters([]);
+                    }}
+                  >
+                    <span>{copy.filterAll}</span>
+                    <span className="table-disease-check" aria-hidden="true">{bloodGroupFilters.length === 0 ? '✓' : ''}</span>
+                  </button>
+                  {bloodGroupFilterOptions.map(option => {
+                    const isSelected = bloodGroupFilters.includes(option.value);
+                    return (
+                      <button
+                        key={`blood-group-filter-${option.value}`}
+                        type="button"
+                        className={`table-status-option table-disease-option ${isSelected ? 'active' : ''}`}
+                        role="option"
+                        aria-selected={isSelected}
+                        onPointerDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setBloodGroupFilters(prev => (
+                            prev.includes(option.value)
+                              ? prev.filter(value => value !== option.value)
+                              : [...prev, option.value]
+                          ));
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        <span className="table-disease-check" aria-hidden="true">{isSelected ? '✓' : ''}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1800,6 +1838,8 @@ export const FamilyTableView = () => {
                 const bloodGroup = getBloodGroup(person);
                 const inheritedRiskSuggestions = inheritedRiskByPersonId.get(person.id) ?? [];
                 const ageYears = getAgeYears(person);
+                const ageLabel = ageYears !== null ? `${ageYears} J.` : '';
+                const hasMobileSummaryMeta = Boolean(bloodGroup || birthLabel || deathLabel || ageLabel);
                 const firstNameInputId = `table-first-editor-${person.id}`;
                 const genderLabel = person.gender === 'male'
                   ? copy.filterMale
@@ -1835,12 +1875,43 @@ export const FamilyTableView = () => {
                           <div className="table-mobile-summary-name">{firstName}</div>
                           <div className="table-mobile-summary-subline">{primaryLastName || '-'}</div>
                         </div>
-                        <div className="table-mobile-summary-meta">
-                          <span className="table-mobile-meta blood">{bloodGroup || '-'}</span>
-                          <span className="table-mobile-meta birth">* {birthLabel}</span>
-                          <span className="table-mobile-meta death">+ {deathLabel}</span>
-                          <span className="table-mobile-meta age">{ageYears !== null ? `${ageYears} J.` : '-'}</span>
-                        </div>
+                        {hasMobileSummaryMeta && (
+                          <div className="table-mobile-summary-meta">
+                            {bloodGroup && (
+                              <span className="table-mobile-meta blood">{bloodGroup}</span>
+                            )}
+                            {birthLabel && (
+                              <span className="table-mobile-meta birth">
+                                <span className="table-mobile-meta-icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <rect x="3.5" y="4.5" width="17" height="16" rx="3" />
+                                    <path d="M8 2.5v4" />
+                                    <path d="M16 2.5v4" />
+                                    <path d="M3.5 9h17" />
+                                    <circle cx="12" cy="15" r="2.4" />
+                                  </svg>
+                                </span>
+                                {birthLabel}
+                              </span>
+                            )}
+                            {deathLabel && (
+                              <span className="table-mobile-meta death">
+                                <span className="table-mobile-meta-icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M8 20v-9a4 4 0 0 1 8 0v9" />
+                                    <path d="M6 20h12" />
+                                    <path d="M12 11v4" />
+                                    <path d="M10 13h4" />
+                                  </svg>
+                                </span>
+                                {deathLabel}
+                              </span>
+                            )}
+                            {ageLabel && (
+                              <span className="table-mobile-meta age">{ageLabel}</span>
+                            )}
+                          </div>
+                        )}
                         <span
                           className="table-mobile-toggle"
                           aria-hidden="true"
@@ -1892,7 +1963,10 @@ export const FamilyTableView = () => {
                                           type="button"
                                           className="last-name-dropdown-item"
                                           onMouseDown={(event) => event.preventDefault()}
-                                          onClick={() => applySuggestedLastName(person.id, index, name)}
+                                          onClick={() => {
+                                            applySuggestedLastName(person.id, index, name);
+                                            setActiveLastNameField(null);
+                                          }}
                                         >
                                           {name}
                                         </button>
@@ -1978,7 +2052,7 @@ export const FamilyTableView = () => {
                                   setActiveRowBloodGroupPersonId(null);
                                 }}
                               >
-                                {copy.filterUnknown}
+                                {copy.bloodGroupPlaceholder}
                               </button>
                               {BLOOD_GROUP_OPTIONS.map(group => (
                                 <button
@@ -2164,7 +2238,10 @@ export const FamilyTableView = () => {
                                           type="button"
                                           className="last-name-dropdown-item"
                                           onMouseDown={(event) => event.preventDefault()}
-                                          onClick={() => applySuggestedKnownDisease(person.id, index, name)}
+                                          onClick={() => {
+                                            applySuggestedKnownDisease(person.id, index, name);
+                                            setActiveKnownDiseaseField(null);
+                                          }}
                                         >
                                           {name}
                                         </button>
@@ -2236,7 +2313,10 @@ export const FamilyTableView = () => {
                                     type="button"
                                     className="last-name-dropdown-item"
                                     onMouseDown={(event) => event.preventDefault()}
-                                    onClick={() => applySuggestedCauseOfDeath(person.id, cause)}
+                                    onClick={() => {
+                                      applySuggestedCauseOfDeath(person.id, cause);
+                                      setActiveCauseOfDeathPersonId(null);
+                                    }}
                                   >
                                     {cause}
                                   </button>

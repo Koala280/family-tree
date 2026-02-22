@@ -472,6 +472,7 @@ export const RichTextEditor = ({
           emitEditorValue();
         }}
         onMouseUp={handleSelectionInteraction}
+        onTouchEnd={handleSelectionInteraction}
         onKeyUp={handleSelectionInteraction}
         onInput={emitEditorValue}
         onKeyDown={handleKeyDown}

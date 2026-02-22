@@ -1,4 +1,4 @@
-import { useRef, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Person } from '../types';
 import { useFamilyTree } from '../context/FamilyTreeContext';
 import { translations } from '../i18n';
@@ -23,10 +23,12 @@ interface PersonEditModalProps {
 export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
   const { updatePerson, familyTree, language } = useFamilyTree();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const bloodGroupDropdownRef = useRef<HTMLDivElement | null>(null);
   const copy = translations[language];
   const [activeLastNameIndex, setActiveLastNameIndex] = useState<number | null>(null);
   const [activeKnownDiseaseIndex, setActiveKnownDiseaseIndex] = useState<number | null>(null);
   const [isCauseOfDeathFocused, setIsCauseOfDeathFocused] = useState(false);
+  const [isBloodGroupDropdownOpen, setIsBloodGroupDropdownOpen] = useState(false);
   const lastNameInputs = (() => {
     const lastNames = getLastNameList(person);
     return lastNames.length > 0 ? lastNames : [''];
@@ -137,8 +139,33 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
     return getParentBloodGroupInfo(familyTree, person.id);
   }, [familyTree, person.id]);
   const currentBloodGroup = getBloodGroup(person);
+  const selectedBloodGroupLabel = currentBloodGroup || copy.bloodGroupPlaceholder;
   const suggestedBloodGroups = parentBloodGroupInfo.suggestions.filter(group => group !== currentBloodGroup);
   const hasSuggestedBloodGroups = suggestedBloodGroups.length > 0;
+
+  useEffect(() => {
+    if (!isBloodGroupDropdownOpen) return;
+
+    const handleOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (bloodGroupDropdownRef.current && !bloodGroupDropdownRef.current.contains(target)) {
+        setIsBloodGroupDropdownOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsBloodGroupDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isBloodGroupDropdownOpen]);
 
   const handleInputChange = (field: keyof Person, value: unknown) => {
     updatePerson(person.id, { [field]: value });
@@ -349,6 +376,7 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
 
   const handleBloodGroupChange = (value: string) => {
     handleInputChange('bloodGroup', value);
+    setIsBloodGroupDropdownOpen(false);
   };
 
   const getMatchingCausesOfDeath = (value: string) => {
@@ -481,7 +509,10 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                                   type="button"
                                   className="last-name-dropdown-item"
                                   onMouseDown={(event) => event.preventDefault()}
-                                  onClick={() => applySuggestedLastName(name, index)}
+                                  onClick={() => {
+                                    applySuggestedLastName(name, index);
+                                    setActiveLastNameIndex(null);
+                                  }}
                                 >
                                   {name}
                                 </button>
@@ -696,7 +727,10 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                                   type="button"
                                   className="last-name-dropdown-item"
                                   onMouseDown={(event) => event.preventDefault()}
-                                  onClick={() => applySuggestedKnownDisease(name, index)}
+                                  onClick={() => {
+                                    applySuggestedKnownDisease(name, index);
+                                    setActiveKnownDiseaseIndex(null);
+                                  }}
                                 >
                                   {name}
                                 </button>
@@ -713,7 +747,7 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                     })()}
                   </div>
                   <div className="known-disease-controls">
-                    <label className="known-disease-hereditary">
+                    <label className="known-disease-hereditary known-disease-hereditary-table">
                       <input
                         type="checkbox"
                         checked={entry.hereditary === true}
@@ -765,18 +799,65 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                 </div>
               </div>
             )}
-            <select
-              className="blood-group-select"
-              value={currentBloodGroup}
-              onChange={(event) => handleBloodGroupChange(event.target.value)}
+            <div
+              className={`table-status-dropdown table-row-bloodgroup-dropdown person-bloodgroup-dropdown ${isBloodGroupDropdownOpen ? 'open' : ''}`}
+              ref={bloodGroupDropdownRef}
             >
-              <option value="">{copy.bloodGroupPlaceholder}</option>
-              {BLOOD_GROUP_OPTIONS.map(group => (
-                <option key={`blood-group-option-${group}`} value={group}>
-                  {group}
-                </option>
-              ))}
-            </select>
+              <button
+                type="button"
+                className="table-status-trigger table-row-bloodgroup-trigger person-bloodgroup-trigger"
+                onClick={() => setIsBloodGroupDropdownOpen(prev => !prev)}
+                aria-haspopup="listbox"
+                aria-expanded={isBloodGroupDropdownOpen}
+                aria-label={copy.bloodGroupLabel}
+              >
+                <span>{selectedBloodGroupLabel}</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
+              {isBloodGroupDropdownOpen && (
+                <div className="table-status-menu table-row-bloodgroup-menu person-bloodgroup-menu" role="listbox" aria-label={copy.bloodGroupLabel}>
+                  <button
+                    type="button"
+                    className={`table-status-option ${currentBloodGroup ? '' : 'active'}`}
+                    role="option"
+                    aria-selected={!currentBloodGroup}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      handleBloodGroupChange('');
+                    }}
+                  >
+                    {copy.bloodGroupPlaceholder}
+                  </button>
+                  {BLOOD_GROUP_OPTIONS.map(group => (
+                    <button
+                      key={`blood-group-option-${person.id}-${group}`}
+                      type="button"
+                      className={`table-status-option ${currentBloodGroup === group ? 'active' : ''}`}
+                      role="option"
+                      aria-selected={currentBloodGroup === group}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        handleBloodGroupChange(group);
+                      }}
+                    >
+                      {group}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="form-group">
@@ -808,7 +889,10 @@ export const PersonEditModal = ({ person, onClose }: PersonEditModalProps) => {
                             type="button"
                             className="last-name-dropdown-item"
                             onMouseDown={(event) => event.preventDefault()}
-                            onClick={() => applySuggestedCauseOfDeath(cause)}
+                            onClick={() => {
+                              applySuggestedCauseOfDeath(cause);
+                              setIsCauseOfDeathFocused(false);
+                            }}
                           >
                             {cause}
                           </button>

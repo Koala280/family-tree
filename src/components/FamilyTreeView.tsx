@@ -132,6 +132,7 @@ export const FamilyTreeView = () => {
   const panOffsetRef = useRef(panOffset);
   const wasTreeOverlayOpenRef = useRef(false);
   const isHandlingOverlayPopRef = useRef(false);
+  const lineMaskIdRef = useRef(`tree-lines-${Math.random().toString(36).slice(2, 9)}`);
   const [dragState, setDragState] = useState<{ id: string | null; dx: number; dy: number; isDragging: boolean }>({
     id: null,
     dx: 0,
@@ -198,6 +199,7 @@ export const FamilyTreeView = () => {
 
   const isTreeOverlayOpen = Boolean(selectedPersonId || editingPersonId || linkMenuState);
   const backButtonLabel = isTreeOverlayOpen ? copy.backToTree : copy.backToOverview;
+  const treeViewClassName = `family-tree-view${isTreeOverlayOpen ? ' tree-overlay-open' : ''}${editingPersonId ? ' tree-person-edit-open' : ''}`;
 
   const closeTreeOverlay = useCallback(() => {
     setSelectedPersonId(null);
@@ -2575,6 +2577,8 @@ export const FamilyTreeView = () => {
     const isConnected = hoveredConnections.personIds.has(person.id);
     const isSearchMatch = searchMatchIds.has(person.id);
     const isSearchFocus = searchFocusId === person.id;
+    const avatarGenderClass = person.gender === 'male' ? 'male' : person.gender === 'female' ? 'female' : 'unknown';
+    const avatarClassName = `tree-person-avatar ${avatarGenderClass} ${person.photo ? 'has-photo' : 'is-placeholder'}`;
     return (
       <div
         key={person.id}
@@ -2595,7 +2599,7 @@ export const FamilyTreeView = () => {
         onMouseEnter={() => setHoveredPersonId(person.id)}
         onMouseLeave={() => setHoveredPersonId(null)}
       >
-        <div className={`tree-person-avatar ${person.gender === 'male' ? 'male' : person.gender === 'female' ? 'female' : ''}`}>
+        <div className={avatarClassName}>
           {person.photo ? (
             <img src={person.photo} alt={personName || copy.profilePhotoAlt} />
           ) : (
@@ -3165,6 +3169,25 @@ export const FamilyTreeView = () => {
   const offsetY = -bounds.minY;
   const treeWidth = bounds.maxX - bounds.minX;
   const treeHeight = bounds.maxY - bounds.minY;
+  const lineMaskBaseId = lineMaskIdRef.current;
+  const lineInsideMaskId = `${lineMaskBaseId}-inside`;
+  const lineBlurFilterId = `${lineMaskBaseId}-blur`;
+  const lineMaskTargets = useMemo(() => {
+    const targets: Array<{ id: string; x: number; y: number }> = [];
+    filteredElements.forEach(element => {
+      if (element.type !== 'person') return;
+      if (dragState.id === element.id && dragState.isDragging) {
+        targets.push({
+          id: element.id,
+          x: element.x + dragState.dx,
+          y: element.y + dragState.dy,
+        });
+        return;
+      }
+      targets.push({ id: element.id, x: element.x, y: element.y });
+    });
+    return targets;
+  }, [filteredElements, dragState.id, dragState.isDragging, dragState.dx, dragState.dy]);
 
   const allPersons = Object.values(familyTree.persons);
   const unconnectedPersons = allPersons.filter(p =>
@@ -3331,7 +3354,7 @@ export const FamilyTreeView = () => {
   };
 
   return (
-    <div className="family-tree-view" ref={viewRef}>
+    <div className={treeViewClassName} ref={viewRef}>
       <div className="family-tree-header">
         <button className="back-to-manager-button" onClick={handleHeaderBackClick} title={backButtonLabel} aria-label={backButtonLabel}>
           <svg viewBox="0 0 24 24" fill="currentColor">
@@ -3383,7 +3406,34 @@ export const FamilyTreeView = () => {
               height={treeHeight}
               style={{ position: 'absolute', top: 0, left: 0 }}
             >
+              <defs>
+                <filter id={lineBlurFilterId} x="-14%" y="-14%" width="128%" height="128%">
+                  <feGaussianBlur stdDeviation="4.5" />
+                </filter>
+                <mask id={lineInsideMaskId} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse">
+                  <rect x="0" y="0" width={treeWidth} height={treeHeight} fill="black" />
+                  <g transform={`translate(${offsetX}, ${offsetY})`}>
+                    {lineMaskTargets.map(target => (
+                      <circle
+                        key={`line-mask-in-${target.id}`}
+                        cx={target.x}
+                        cy={target.y + AVATAR_VISUAL_CENTER}
+                        r={AVATAR_VISUAL_CENTER + 2}
+                        fill="white"
+                      />
+                    ))}
+                  </g>
+                </mask>
+              </defs>
               <g transform={`translate(${offsetX}, ${offsetY})`}>
+                {renderConnections()}
+              </g>
+              <g
+                transform={`translate(${offsetX}, ${offsetY})`}
+                mask={`url(#${lineInsideMaskId})`}
+                filter={`url(#${lineBlurFilterId})`}
+                style={{ pointerEvents: 'none', opacity: 1 }}
+              >
                 {renderConnections()}
               </g>
             </svg>
