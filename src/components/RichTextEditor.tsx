@@ -1,4 +1,5 @@
-import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { useFamilyTree } from '../context/FamilyTreeContext';
 import { translations } from '../i18n';
 import { isRichTextEmpty, normalizeRichTextForStorage } from '../utils/richText';
@@ -25,6 +26,11 @@ type FormatPainterSnapshot = {
   fontFamily: string;
   fontSize: string;
 };
+
+const FLOATING_MENU_Z_INDEX = 2147483000;
+const FORMAT_MENU_MIN_WIDTH = 130;
+const FORMAT_MENU_TARGET_WIDTH = 170;
+const FORMAT_MENU_MAX_WIDTH = 210;
 
 const runExecCommand = (command: string, value?: string) => {
   if (typeof document === 'undefined') return false;
@@ -54,11 +60,58 @@ export const RichTextEditor = ({
   const [formatPainterSnapshot, setFormatPainterSnapshot] = useState<FormatPainterSnapshot | null>(null);
   const [isFormatOpen, setIsFormatOpen] = useState(false);
   const formatDropdownRef = useRef<HTMLDivElement>(null);
+  const formatMenuRef = useRef<HTMLDivElement>(null);
+  const [formatMenuStyle, setFormatMenuStyle] = useState<CSSProperties | null>(null);
 
   const rootClassName = useMemo(
     () => `rich-text-input ${compact ? 'compact' : ''} ${className}`.trim(),
     [className, compact]
   );
+
+  const positionFormatMenu = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    const dropdown = formatDropdownRef.current;
+    const menu = formatMenuRef.current;
+    if (!dropdown || !menu) return;
+
+    const triggerRect = dropdown.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const viewportPadding = 8;
+    const edgeGap = 4;
+    const viewportMaxWidth = Math.max(0, window.innerWidth - viewportPadding * 2);
+
+    const menuWidth = Math.max(
+      FORMAT_MENU_MIN_WIDTH,
+      Math.min(
+        Math.max(Math.ceil(triggerRect.width), FORMAT_MENU_TARGET_WIDTH),
+        Math.min(FORMAT_MENU_MAX_WIDTH, viewportMaxWidth)
+      )
+    );
+
+    const menuHeight = Math.ceil(menuRect.height || 220);
+    const spaceBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+    const spaceAbove = triggerRect.top - viewportPadding;
+    const openUp = spaceBelow < menuHeight + edgeGap && spaceAbove > spaceBelow;
+
+    let top = openUp
+      ? triggerRect.top - menuHeight - edgeGap
+      : triggerRect.bottom + edgeGap;
+    top = Math.max(viewportPadding, Math.min(top, window.innerHeight - menuHeight - viewportPadding));
+
+    let left = triggerRect.left;
+    left = Math.max(viewportPadding, Math.min(left, window.innerWidth - menuWidth - viewportPadding));
+
+    setFormatMenuStyle({
+      position: 'fixed',
+      top: Math.round(top),
+      left: Math.round(left),
+      width: Math.round(menuWidth),
+      maxWidth: `calc(100vw - ${viewportPadding * 2}px)`,
+      maxHeight: `calc(100vh - ${viewportPadding * 2}px)`,
+      zIndex: FLOATING_MENU_Z_INDEX,
+      visibility: 'visible',
+    });
+  }, []);
 
   const refreshEmptyState = () => {
     const editor = editorRef.current;
@@ -270,13 +323,62 @@ export const RichTextEditor = ({
   useEffect(() => {
     if (!isFormatOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
-      if (formatDropdownRef.current && !formatDropdownRef.current.contains(e.target as Node)) {
-        setIsFormatOpen(false);
-      }
+      const target = e.target as Node;
+      if (formatDropdownRef.current?.contains(target)) return;
+      if (formatMenuRef.current?.contains(target)) return;
+      setIsFormatOpen(false);
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isFormatOpen]);
+
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!isFormatOpen) {
+      setFormatMenuStyle(null);
+      return;
+    }
+
+    const dropdown = formatDropdownRef.current;
+    if (dropdown) {
+      const triggerRect = dropdown.getBoundingClientRect();
+      const viewportPadding = 8;
+      const viewportMaxWidth = Math.max(0, window.innerWidth - viewportPadding * 2);
+      const initialWidth = Math.max(
+        FORMAT_MENU_MIN_WIDTH,
+        Math.min(
+          Math.max(Math.ceil(triggerRect.width), FORMAT_MENU_TARGET_WIDTH),
+          Math.min(FORMAT_MENU_MAX_WIDTH, viewportMaxWidth)
+        )
+      );
+      setFormatMenuStyle({
+        position: 'fixed',
+        top: Math.round(triggerRect.bottom + 4),
+        left: Math.round(triggerRect.left),
+        width: Math.round(initialWidth),
+        maxWidth: 'calc(100vw - 16px)',
+        maxHeight: 'calc(100vh - 16px)',
+        zIndex: FLOATING_MENU_Z_INDEX,
+        visibility: 'hidden',
+      });
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      positionFormatMenu();
+    });
+    const handleViewportChange = () => {
+      positionFormatMenu();
+    };
+
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [isFormatOpen, positionFormatMenu]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' && formatPainterSnapshot) {
@@ -369,29 +471,36 @@ export const RichTextEditor = ({
             <span>{copy.richTextFormatLabel}</span>
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4" /></svg>
           </button>
-          {isFormatOpen && (
-            <div className="rich-text-format-menu" role="listbox" aria-label={copy.richTextFormatLabel}>
-              {([
-                ['P', copy.richTextFormatOptionParagraph],
-                ['H2', copy.richTextFormatOptionH2],
-                ['H3', copy.richTextFormatOptionH3],
-                ['BLOCKQUOTE', copy.richTextFormatOptionQuote],
-                ['PRE', copy.richTextFormatOptionCode],
-              ] as const).map(([val, label]) => (
-                <button
-                  key={val}
-                  type="button"
-                  className="rich-text-format-option"
-                  role="option"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { handleBlockTypeChange(val); setIsFormatOpen(false); }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
+        {isFormatOpen && typeof document !== 'undefined' && createPortal(
+          <div
+            ref={formatMenuRef}
+            className="rich-text-format-menu floating"
+            style={formatMenuStyle ?? undefined}
+            role="listbox"
+            aria-label={copy.richTextFormatLabel}
+          >
+            {([
+              ['P', copy.richTextFormatOptionParagraph],
+              ['H2', copy.richTextFormatOptionH2],
+              ['H3', copy.richTextFormatOptionH3],
+              ['BLOCKQUOTE', copy.richTextFormatOptionQuote],
+              ['PRE', copy.richTextFormatOptionCode],
+            ] as const).map(([val, label]) => (
+              <button
+                key={val}
+                type="button"
+                className="rich-text-format-option"
+                role="option"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => { handleBlockTypeChange(val); setIsFormatOpen(false); }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>,
+          document.body
+        )}
         <button
           type="button"
           className={`rich-text-btn ${formatPainterSnapshot ? 'active' : ''}`}

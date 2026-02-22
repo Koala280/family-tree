@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-tree-cache-v2';
+const CACHE_NAME = 'family-tree-cache-v4';
 const SHARE_TARGET_PATH = '/share-target';
 const SHARED_IMPORT_CACHE_PATH = '/__shared-tree-import__.json';
 const APP_SHELL = [

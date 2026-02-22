@@ -95,6 +95,24 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
     return Array.from(bySignature.values());
   };
 
+  const getDistinctPartnerIds = (unions: Union[]) => (
+    Array.from(new Set(
+      unions
+        .flatMap(union => union.partnerIds)
+        .filter(partnerId => partnerId !== personId && Boolean(familyTree.persons[partnerId]))
+    ))
+  );
+
+  const getPreferredChildUnion = (unions: Union[]) => {
+    if (unions.length === 0) return undefined;
+    const distinctPartnerIds = getDistinctPartnerIds(unions);
+    if (distinctPartnerIds.length === 1) {
+      const preferred = unions.find(union => union.partnerIds.includes(distinctPartnerIds[0]));
+      if (preferred) return preferred;
+    }
+    return unions[0];
+  };
+
   const getUnionPartners = (union: Union) =>
     union.partnerIds
       .map(id => familyTree.persons[id])
@@ -150,12 +168,14 @@ export const LinkMenu = ({ personId, type, onClose }: LinkMenuProps) => {
     }
 
     const unions = getPersonUnions();
-    if (unions.length > 1) {
+    const distinctPartnerIds = getDistinctPartnerIds(unions);
+    if (unions.length > 1 && distinctPartnerIds.length > 1) {
       setPendingChildId(targetPersonId);
       return;
     }
 
-    addChild(personId, targetPersonId, unions[0]?.id);
+    const preferredUnion = getPreferredChildUnion(unions);
+    addChild(personId, targetPersonId, preferredUnion?.id);
     onClose();
   };
 

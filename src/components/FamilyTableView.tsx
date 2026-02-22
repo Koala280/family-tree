@@ -324,6 +324,25 @@ const YearWheelInput = ({
     }, MOBILE_WHEEL_SETTLE_MS);
   };
 
+  const handleMobileYearClick = (index: number, year: number) => {
+    if (mobileSettleTimerRef.current !== null) {
+      window.clearTimeout(mobileSettleTimerRef.current);
+      mobileSettleTimerRef.current = null;
+    }
+
+    const viewport = mobileViewportRef.current;
+    if (viewport) {
+      const targetTop = MOBILE_WHEEL_SPACER_HEIGHT + index * MOBILE_WHEEL_ITEM_HEIGHT - (viewport.clientHeight / 2 - MOBILE_WHEEL_ITEM_HEIGHT / 2);
+      if (Math.abs(viewport.scrollTop - targetTop) > 1) {
+        viewport.scrollTo({ top: targetTop, behavior: 'smooth' });
+      }
+    }
+
+    if (String(year) !== value) {
+      onChange(String(year));
+    }
+  };
+
   const handleDesktopInputChange = (raw: string) => {
     const sanitized = raw.replace(/\D+/g, '').slice(0, 4);
     onChange(sanitized);
@@ -395,7 +414,8 @@ const YearWheelInput = ({
             title={clearLabel}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M18 6L6 18M6 6l12 12" />
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
             </svg>
           </button>
         )}
@@ -411,12 +431,12 @@ const YearWheelInput = ({
           onScroll={handleMobileScroll}
         >
           <div className="table-year-wheel-mobile-spacer" aria-hidden="true" />
-          {wheelYears.map(year => (
+          {wheelYears.map((year, index) => (
             <button
               key={`mobile-wheel-${ariaLabel}-${year}`}
               type="button"
               className={`table-year-wheel-mobile-item ${year === activeYear ? 'is-active' : ''}`}
-              onClick={() => onChange(String(year))}
+              onClick={() => handleMobileYearClick(index, year)}
             >
               {year}
             </button>
@@ -432,7 +452,8 @@ const YearWheelInput = ({
             title={clearLabel}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M18 6L6 18M6 6l12 12" />
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
             </svg>
           </button>
         )}
@@ -2001,6 +2022,28 @@ export const FamilyTableView = () => {
                     </div>
                   </td>
                   <td data-label={copy.columnGender}>
+                    <div className="table-gender-mobile-buttons" role="group" aria-label={`${copy.columnGender}: ${firstName}`}>
+                      <button
+                        type="button"
+                        className={`table-gender-mobile-btn male ${person.gender === 'male' ? 'active' : ''}`}
+                        onClick={() => updatePerson(person.id, { gender: 'male' })}
+                        aria-pressed={person.gender === 'male'}
+                        title={copy.filterMale}
+                      >
+                        {renderGenderIcon('male')}
+                        <span>{copy.maleLabel}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`table-gender-mobile-btn female ${person.gender === 'female' ? 'active' : ''}`}
+                        onClick={() => updatePerson(person.id, { gender: 'female' })}
+                        aria-pressed={person.gender === 'female'}
+                        title={copy.filterFemale}
+                      >
+                        {renderGenderIcon('female')}
+                        <span>{copy.femaleLabel}</span>
+                      </button>
+                    </div>
                     <button
                       type="button"
                       className={`table-gender-cycle ${person.gender ?? 'unknown'}`}

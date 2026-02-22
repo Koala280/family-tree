@@ -132,7 +132,6 @@ export const FamilyTreeView = () => {
   const panOffsetRef = useRef(panOffset);
   const wasTreeOverlayOpenRef = useRef(false);
   const isHandlingOverlayPopRef = useRef(false);
-  const lineMaskIdRef = useRef(`tree-lines-${Math.random().toString(36).slice(2, 9)}`);
   const [dragState, setDragState] = useState<{ id: string | null; dx: number; dy: number; isDragging: boolean }>({
     id: null,
     dx: 0,
@@ -541,8 +540,14 @@ export const FamilyTreeView = () => {
         }
       });
       const distinctPersonUnions = Array.from(dedupedUnionBySignature.values());
+      const distinctPartnerIds = Array.from(new Set(
+        distinctPersonUnions
+          .flatMap(union => union.partnerIds)
+          .filter(partnerId => partnerId !== selectedPersonId && Boolean(familyTree.persons[partnerId]))
+      ));
+      const shouldAskForPartner = distinctPartnerIds.length > 1;
 
-      if (distinctPersonUnions.length > 1) {
+      if (shouldAskForPartner) {
         setLinkMenuState({ personId: selectedPersonId, type: 'add-child' });
       } else {
         // Calculate child position based on parent's position
@@ -550,6 +555,9 @@ export const FamilyTreeView = () => {
         const personGen = person.position?.generation ?? FOCUS_GENERATION;
         const childGen = personGen + 1;
         let union = distinctPersonUnions[0];
+        if (distinctPartnerIds.length === 1) {
+          union = distinctPersonUnions.find(candidateUnion => candidateUnion.partnerIds.includes(distinctPartnerIds[0])) ?? union;
+        }
         let createdSpouseId: string | null = null;
         let createdSpouseX: number | null = null;
         let targetUnionId = union?.id;
@@ -2078,6 +2086,15 @@ export const FamilyTreeView = () => {
     return generations;
   }, [visibleElements]);
 
+  const filteredPersonBasePositionById = useMemo(() => {
+    const positions = new Map<string, { x: number; y: number }>();
+    filteredElements.forEach(element => {
+      if (element.type !== 'person') return;
+      positions.set(element.id, { x: element.x, y: element.y });
+    });
+    return positions;
+  }, [filteredElements]);
+
   // Get all directly connected persons and unions for highlighting
   const getConnectedRelatives = useCallback((personId: string) => {
     const person = familyTree.persons[personId];
@@ -2354,8 +2371,12 @@ export const FamilyTreeView = () => {
     const offsets = new Map<string, number>();
     const visibleUnionX = new Map<string, number>();
     const visiblePersonIds = new Set<string>();
-    const offsetProposalsByUnion = new Map<string, number[]>();
-    const LANE_STEP = Math.max(10, Math.round(SYMBOL_SIZE * 0.35));
+    const laneProposalsByUnion = new Map<string, number[]>();
+    const orderedSpouseUnionsByPerson = new Map<string, string[]>();
+    const LANE_STEP = Math.max(16, Math.round(SYMBOL_SIZE * 0.55));
+    const MIN_LANE_GAP = 1;
+    const RELAXATION_FACTOR = 0.35;
+    const MAX_PASSES = 72;
 
     filteredElements.forEach(element => {
       if (element.type === 'person') {
@@ -2366,47 +2387,158 @@ export const FamilyTreeView = () => {
       visibleUnionX.set(element.id, element.x);
     });
 
-    const addOffsetProposal = (unionId: string, offset: number) => {
-      const existing = offsetProposalsByUnion.get(unionId);
+    const addLaneProposal = (unionId: string, lane: number) => {
+      const existing = laneProposalsByUnion.get(unionId);
       if (existing) {
-        existing.push(offset);
+        existing.push(lane);
       } else {
-        offsetProposalsByUnion.set(unionId, [offset]);
+        laneProposalsByUnion.set(unionId, [lane]);
       }
+    };
+
+    const getSortedSpouseUnionIds = (personId: string) => {
+      const person = familyTree.persons[personId];
+      if (!person) return [];
+
+      return person.unionIds
+        .filter(unionId => {
+          const union = familyTree.unions[unionId];
+          return Boolean(union && union.partnerIds.length > 1 && visibleUnionX.has(unionId));
+        })
+        .slice()
+        .sort((a, b) => {
+          const ax = visibleUnionX.get(a) ?? 0;
+          const bx = visibleUnionX.get(b) ?? 0;
+          if (Math.abs(ax - bx) > 0.5) return ax - bx;
+          return a.localeCompare(b);
+        });
     };
 
     Array.from(visiblePersonIds)
       .sort((a, b) => a.localeCompare(b))
       .forEach(personId => {
-        const person = familyTree.persons[personId];
-        if (!person) return;
-
-        const spouseUnionIds = person.unionIds
-          .filter(unionId => {
-            const union = familyTree.unions[unionId];
-            return Boolean(union && union.partnerIds.length > 1 && visibleUnionX.has(unionId));
-          })
-          .slice()
-          .sort((a, b) => {
-            const ax = visibleUnionX.get(a) ?? 0;
-            const bx = visibleUnionX.get(b) ?? 0;
-            if (Math.abs(ax - bx) > 0.5) return ax - bx;
-            return a.localeCompare(b);
-          });
-
+        const spouseUnionIds = getSortedSpouseUnionIds(personId);
         if (spouseUnionIds.length < 2) return;
 
+        orderedSpouseUnionsByPerson.set(personId, spouseUnionIds);
         const centerIndex = (spouseUnionIds.length - 1) / 2;
         spouseUnionIds.forEach((unionId, index) => {
-          const laneOffset = (index - centerIndex) * LANE_STEP;
-          addOffsetProposal(unionId, laneOffset);
+          addLaneProposal(unionId, index - centerIndex);
         });
       });
 
-    offsetProposalsByUnion.forEach((proposals, unionId) => {
+    if (laneProposalsByUnion.size === 0) {
+      return offsets;
+    }
+
+    const preferredLaneByUnion = new Map<string, number>();
+    laneProposalsByUnion.forEach((proposals, unionId) => {
       if (proposals.length === 0) return;
-      const averageOffset = proposals.reduce((sum, value) => sum + value, 0) / proposals.length;
-      offsets.set(unionId, averageOffset);
+      preferredLaneByUnion.set(
+        unionId,
+        proposals.reduce((sum, value) => sum + value, 0) / proposals.length
+      );
+    });
+
+    const laneByUnion = new Map<string, number>(preferredLaneByUnion);
+
+    for (let pass = 0; pass < MAX_PASSES; pass += 1) {
+      let changed = false;
+
+      preferredLaneByUnion.forEach((preferredLane, unionId) => {
+        const currentLane = laneByUnion.get(unionId) ?? 0;
+        const nextLane = currentLane + (preferredLane - currentLane) * RELAXATION_FACTOR;
+        if (Math.abs(nextLane - currentLane) > 0.0001) {
+          laneByUnion.set(unionId, nextLane);
+          changed = true;
+        }
+      });
+
+      orderedSpouseUnionsByPerson.forEach(unionIds => {
+        for (let index = 0; index < unionIds.length - 1; index += 1) {
+          const leftUnionId = unionIds[index];
+          const rightUnionId = unionIds[index + 1];
+          const leftLane = laneByUnion.get(leftUnionId) ?? 0;
+          const rightLane = laneByUnion.get(rightUnionId) ?? 0;
+          const requiredRightLane = leftLane + MIN_LANE_GAP;
+
+          if (rightLane + 0.0001 >= requiredRightLane) continue;
+
+          const correction = requiredRightLane - rightLane;
+          const shift = correction / 2;
+          laneByUnion.set(leftUnionId, leftLane - shift);
+          laneByUnion.set(rightUnionId, rightLane + shift);
+          changed = true;
+        }
+
+        for (let index = unionIds.length - 2; index >= 0; index -= 1) {
+          const leftUnionId = unionIds[index];
+          const rightUnionId = unionIds[index + 1];
+          const leftLane = laneByUnion.get(leftUnionId) ?? 0;
+          const rightLane = laneByUnion.get(rightUnionId) ?? 0;
+          const requiredRightLane = leftLane + MIN_LANE_GAP;
+
+          if (rightLane + 0.0001 >= requiredRightLane) continue;
+
+          const correction = requiredRightLane - rightLane;
+          const shift = correction / 2;
+          laneByUnion.set(leftUnionId, leftLane - shift);
+          laneByUnion.set(rightUnionId, rightLane + shift);
+          changed = true;
+        }
+      });
+
+      if (!changed) break;
+    }
+
+    const adjacentUnions = new Map<string, Set<string>>();
+    laneByUnion.forEach((_lane, unionId) => {
+      adjacentUnions.set(unionId, new Set<string>());
+    });
+
+    orderedSpouseUnionsByPerson.forEach(unionIds => {
+      for (let index = 0; index < unionIds.length - 1; index += 1) {
+        const leftUnionId = unionIds[index];
+        const rightUnionId = unionIds[index + 1];
+        adjacentUnions.get(leftUnionId)?.add(rightUnionId);
+        adjacentUnions.get(rightUnionId)?.add(leftUnionId);
+      }
+    });
+
+    const visitedUnions = new Set<string>();
+    laneByUnion.forEach((_lane, startUnionId) => {
+      if (visitedUnions.has(startUnionId)) return;
+
+      const queue = [startUnionId];
+      const componentUnionIds: string[] = [];
+      visitedUnions.add(startUnionId);
+
+      while (queue.length > 0) {
+        const unionId = queue.shift()!;
+        componentUnionIds.push(unionId);
+        (adjacentUnions.get(unionId) ?? new Set<string>()).forEach(neighborUnionId => {
+          if (visitedUnions.has(neighborUnionId)) return;
+          visitedUnions.add(neighborUnionId);
+          queue.push(neighborUnionId);
+        });
+      }
+
+      if (componentUnionIds.length === 0) return;
+
+      const meanLane = componentUnionIds.reduce((sum, unionId) => {
+        return sum + (laneByUnion.get(unionId) ?? 0);
+      }, 0) / componentUnionIds.length;
+
+      componentUnionIds.forEach(unionId => {
+        laneByUnion.set(unionId, (laneByUnion.get(unionId) ?? 0) - meanLane);
+      });
+    });
+
+    laneByUnion.forEach((lane, unionId) => {
+      const offset = lane * LANE_STEP;
+      if (Math.abs(offset) > 0.5) {
+        offsets.set(unionId, offset);
+      }
     });
 
     return offsets;
@@ -2647,13 +2779,56 @@ export const FamilyTreeView = () => {
     );
   };
 
+  const getDraggedUnionLiveCenter = (union: Union): { x: number; y: number } | null => {
+    if (
+      !dragState.isDragging
+      || !dragState.id
+      || !union.partnerIds.includes(dragState.id)
+    ) {
+      return null;
+    }
+
+    const currentPartnerPositions = union.partnerIds
+      .map(partnerId => {
+        const base = filteredPersonBasePositionById.get(partnerId);
+        if (!base) return null;
+        if (dragState.id === partnerId) {
+          return { x: base.x + dragState.dx, y: base.y + dragState.dy };
+        }
+        return base;
+      })
+      .filter((position): position is { x: number; y: number } => Boolean(position));
+
+    if (currentPartnerPositions.length === 0) {
+      return null;
+    }
+
+    if (currentPartnerPositions.length === 1) {
+      const partner = currentPartnerPositions[0];
+      return {
+        x: partner.x,
+        y: partner.y + SINGLE_PARENT_SYMBOL_TOP_OFFSET + SYMBOL_SIZE / 2,
+      };
+    }
+
+    return {
+      x: currentPartnerPositions.reduce((sum, position) => sum + position.x, 0) / currentPartnerPositions.length,
+      y: currentPartnerPositions.reduce((sum, position) => sum + (position.y + AVATAR_VISUAL_CENTER), 0) / currentPartnerPositions.length,
+    };
+  };
+
   // Render marriage/divorce symbol
   const renderUnionSymbol = (unionId: string, x: number, y: number) => {
     const union = familyTree.unions[unionId];
     if (!union) return null;
+    if (dragState.isDragging) return null;
 
     const symbolOffset = unionSymbolOffsets.get(unionId) ?? 0;
     const symbolXOffset = unionSymbolXOffsets.get(unionId) ?? 0;
+    const liveDraggedCenter = getDraggedUnionLiveCenter(union);
+    const symbolCenterX = liveDraggedCenter ? liveDraggedCenter.x + offsetX : x + symbolXOffset;
+    const symbolCenterY = liveDraggedCenter ? liveDraggedCenter.y + offsetY : y + SYMBOL_SIZE / 2 + symbolOffset;
+    const isDraggingUnionSymbol = Boolean(liveDraggedCenter);
     const isDivorced = union.status === 'divorced';
     const hoveredConnections = hoveredPersonId ? getConnectedRelatives(hoveredPersonId) : { personIds: new Set<string>(), unionIds: new Set<string>() };
     const isConnected = hoveredConnections.unionIds.has(unionId);
@@ -2662,13 +2837,14 @@ export const FamilyTreeView = () => {
       <div
         key={`symbol-${unionId}`}
         ref={registerSymbolRef(unionId)}
-        className={`union-symbol ${isDivorced ? 'divorced' : 'married'} ${hoveredPersonId && isConnected ? 'connected' : ''}`}
+        className={`union-symbol ${isDivorced ? 'divorced' : 'married'} ${isDraggingUnionSymbol ? 'dragging' : ''} ${hoveredPersonId && isConnected ? 'connected' : ''}`}
         style={{
           position: 'absolute',
-          left: x - SYMBOL_SIZE / 2 + symbolXOffset,
-          top: y + symbolOffset,
+          left: symbolCenterX - SYMBOL_SIZE / 2,
+          top: symbolCenterY - SYMBOL_SIZE / 2,
           width: SYMBOL_SIZE,
           height: SYMBOL_SIZE,
+          transition: isDraggingUnionSymbol ? 'none' : undefined,
           zIndex: 5,
         }}
         onClick={(e) => {
@@ -2967,6 +3143,104 @@ export const FamilyTreeView = () => {
       return person.x + direction * horizontalReach;
     };
 
+    const drawDirectPersonLine = (
+      from: PositionedElement,
+      to: PositionedElement,
+      key: string,
+      className: string
+    ) => {
+      const fromCenterX = from.x;
+      const fromCenterY = from.y + AVATAR_VISUAL_CENTER;
+      const toCenterX = to.x;
+      const toCenterY = to.y + AVATAR_VISUAL_CENTER;
+      const vectorX = toCenterX - fromCenterX;
+      const vectorY = toCenterY - fromCenterY;
+      const distance = Math.hypot(vectorX, vectorY);
+      if (distance <= 0.5) return;
+
+      const unitX = vectorX / distance;
+      const unitY = vectorY / distance;
+      const startX = fromCenterX + unitX * AVATAR_VISUAL_CENTER;
+      const startY = fromCenterY + unitY * AVATAR_VISUAL_CENTER;
+      const endX = toCenterX - unitX * AVATAR_VISUAL_CENTER;
+      const endY = toCenterY - unitY * AVATAR_VISUAL_CENTER;
+
+      if (Math.abs(endX - startX) <= 0.5 && Math.abs(endY - startY) <= 0.5) return;
+
+      lines.push(
+        <line
+          key={key}
+          x1={startX}
+          y1={startY}
+          x2={endX}
+          y2={endY}
+          className={className}
+        />
+      );
+    };
+
+    // During dragging, render direct person-to-person lines for the dragged person.
+    if (dragState.isDragging && dragState.id) {
+      const draggedPersonId = dragState.id;
+      const draggedPosition = personPositions.get(draggedPersonId);
+      const draggedPerson = familyTree.persons[draggedPersonId];
+      if (!draggedPosition || !draggedPerson) return lines;
+
+      draggedPerson.unionIds.forEach(unionId => {
+        const union = familyTree.unions[unionId];
+        if (!union) return;
+
+        const spouseClassName = getLineClassName(
+          `connection-line spouse ${union.status === 'divorced' ? 'divorced' : ''}`,
+          union.id
+        );
+        union.partnerIds.forEach(partnerId => {
+          if (partnerId === draggedPersonId) return;
+          const partnerPosition = personPositions.get(partnerId);
+          if (!partnerPosition) return;
+          drawDirectPersonLine(
+            draggedPosition,
+            partnerPosition,
+            `drag-direct-spouse-${draggedPersonId}-${partnerId}-${union.id}`,
+            spouseClassName
+          );
+        });
+
+        const parentClassName = getLineClassName("connection-line parent", union.id);
+        getRenderChildIds(union).forEach(childId => {
+          const childPosition = personPositions.get(childId);
+          if (!childPosition) return;
+          drawDirectPersonLine(
+            draggedPosition,
+            childPosition,
+            `drag-direct-child-${draggedPersonId}-${childId}-${union.id}`,
+            parentClassName
+          );
+        });
+      });
+
+      const parentUnionId = canonicalParentUnionByPerson.get(draggedPersonId);
+      if (parentUnionId) {
+        const parentUnion = familyTree.unions[parentUnionId];
+        if (parentUnion) {
+          const parentClassName = getLineClassName("connection-line parent", parentUnion.id);
+          parentUnion.partnerIds.forEach(parentId => {
+            if (parentId === draggedPersonId) return;
+            const parentPosition = personPositions.get(parentId);
+            if (!parentPosition) return;
+            drawDirectPersonLine(
+              draggedPosition,
+              parentPosition,
+              `drag-direct-parent-${draggedPersonId}-${parentId}-${parentUnion.id}`,
+              parentClassName
+            );
+          });
+        }
+      }
+
+      return lines;
+    }
+
     // Now draw connections
     unionElements.forEach(element => {
       const union = familyTree.unions[element.id];
@@ -2974,13 +3248,10 @@ export const FamilyTreeView = () => {
 
       const symbolOffset = unionSymbolOffsets.get(element.id) ?? 0;
       const symbolXOffset = unionSymbolXOffsets.get(element.id) ?? 0;
-      const symbolX = element.x + symbolXOffset;
-      const symbolY = element.y + SYMBOL_SIZE / 2 + symbolOffset;
-      const isDraggingPartnerFromUnion = Boolean(
-        dragState.isDragging
-        && dragState.id
-        && union.partnerIds.includes(dragState.id)
-      );
+      const liveDraggedCenter = getDraggedUnionLiveCenter(union);
+      const symbolX = liveDraggedCenter ? liveDraggedCenter.x : element.x + symbolXOffset;
+      const symbolY = liveDraggedCenter ? liveDraggedCenter.y : element.y + SYMBOL_SIZE / 2 + symbolOffset;
+      const isDraggingPartnerFromUnion = Boolean(liveDraggedCenter);
 
       const partnerPositions = union.partnerIds
         .map(id => personPositions.get(id))
@@ -2989,6 +3260,30 @@ export const FamilyTreeView = () => {
       const drawPartnerToSymbol = (partner: PositionedElement, keySuffix: string) => {
         const partnerCenterX = partner.x;
         const partnerCenterY = partner.y + AVATAR_VISUAL_CENTER;
+        const direction: -1 | 1 = symbolX >= partnerCenterX ? 1 : -1;
+
+        // Prefer a straight horizontal connector whenever possible.
+        const routedY = clampValue(partnerCenterY, symbolY - SYMBOL_RADIUS + 1, symbolY + SYMBOL_RADIUS - 1);
+        const symbolDeltaY = routedY - symbolY;
+        const symbolReachSquared = SYMBOL_RADIUS * SYMBOL_RADIUS - symbolDeltaY * symbolDeltaY;
+        const symbolReach = symbolReachSquared > 0 ? Math.sqrt(symbolReachSquared) : 0;
+        const horizontalStartX = getAvatarEdgeXAtY(partner, routedY, direction);
+        const horizontalEndX = symbolX - direction * symbolReach;
+
+        if (Math.abs(horizontalEndX - horizontalStartX) > 0.5) {
+          lines.push(
+            <line
+              key={`spouse-direct-${element.id}-${partner.id}-${keySuffix}`}
+              x1={horizontalStartX}
+              y1={routedY}
+              x2={horizontalEndX}
+              y2={routedY}
+              className={getLineClassName(`connection-line spouse ${union.status === 'divorced' ? 'divorced' : ''}`, element.id)}
+            />
+          );
+          return;
+        }
+
         const vectorX = symbolX - partnerCenterX;
         const vectorY = symbolY - partnerCenterY;
         const distance = Math.hypot(vectorX, vectorY);
@@ -3169,25 +3464,6 @@ export const FamilyTreeView = () => {
   const offsetY = -bounds.minY;
   const treeWidth = bounds.maxX - bounds.minX;
   const treeHeight = bounds.maxY - bounds.minY;
-  const lineMaskBaseId = lineMaskIdRef.current;
-  const lineInsideMaskId = `${lineMaskBaseId}-inside`;
-  const lineBlurFilterId = `${lineMaskBaseId}-blur`;
-  const lineMaskTargets = useMemo(() => {
-    const targets: Array<{ id: string; x: number; y: number }> = [];
-    filteredElements.forEach(element => {
-      if (element.type !== 'person') return;
-      if (dragState.id === element.id && dragState.isDragging) {
-        targets.push({
-          id: element.id,
-          x: element.x + dragState.dx,
-          y: element.y + dragState.dy,
-        });
-        return;
-      }
-      targets.push({ id: element.id, x: element.x, y: element.y });
-    });
-    return targets;
-  }, [filteredElements, dragState.id, dragState.isDragging, dragState.dx, dragState.dy]);
 
   const allPersons = Object.values(familyTree.persons);
   const unconnectedPersons = allPersons.filter(p =>
@@ -3406,34 +3682,7 @@ export const FamilyTreeView = () => {
               height={treeHeight}
               style={{ position: 'absolute', top: 0, left: 0 }}
             >
-              <defs>
-                <filter id={lineBlurFilterId} x="-14%" y="-14%" width="128%" height="128%">
-                  <feGaussianBlur stdDeviation="4.5" />
-                </filter>
-                <mask id={lineInsideMaskId} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse">
-                  <rect x="0" y="0" width={treeWidth} height={treeHeight} fill="black" />
-                  <g transform={`translate(${offsetX}, ${offsetY})`}>
-                    {lineMaskTargets.map(target => (
-                      <circle
-                        key={`line-mask-in-${target.id}`}
-                        cx={target.x}
-                        cy={target.y + AVATAR_VISUAL_CENTER}
-                        r={AVATAR_VISUAL_CENTER + 2}
-                        fill="white"
-                      />
-                    ))}
-                  </g>
-                </mask>
-              </defs>
               <g transform={`translate(${offsetX}, ${offsetY})`}>
-                {renderConnections()}
-              </g>
-              <g
-                transform={`translate(${offsetX}, ${offsetY})`}
-                mask={`url(#${lineInsideMaskId})`}
-                filter={`url(#${lineBlurFilterId})`}
-                style={{ pointerEvents: 'none', opacity: 1 }}
-              >
                 {renderConnections()}
               </g>
             </svg>
