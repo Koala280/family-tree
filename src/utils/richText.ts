@@ -136,6 +136,10 @@ const getSafeHref = (href: string) => {
   const trimmed = href.trim();
   if (!trimmed) return null;
 
+  if (/^(\/\/|\\\\)/.test(trimmed)) {
+    return null;
+  }
+
   if (trimmed.startsWith('#') || trimmed.startsWith('/')) {
     return trimmed;
   }

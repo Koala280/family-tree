@@ -79,6 +79,8 @@ const CUSTOM_TRANSLATIONS_KEY = 'family-tree-custom-translations';
 const CUSTOM_TRANSLATION_IMPORT_ERROR = 'Failed to import language file. Please provide a valid JSON translation file.';
 const ENCRYPTION_VERSION = 1;
 const ENCRYPTION_ITERATIONS = 310000;
+const MIN_ENCRYPTION_ITERATIONS = 1;
+const MAX_ENCRYPTION_ITERATIONS = 1000000;
 const ENCRYPTION_SALT_BYTES = 16;
 const ENCRYPTION_IV_BYTES = 12;
 const ENCRYPTION_TYPE = 'family-tree-export';
@@ -91,6 +93,7 @@ const APP_DATA_DB = 'family-tree-secure-data';
 const APP_DATA_STORE = 'state';
 const APP_DATA_KEY_ID = 'trees-data';
 const INLINE_WHITESPACE_PATTERN = /[ \t\f\v\u00a0]+/g;
+const RESERVED_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 type PasswordModalState = {
   title: string;
@@ -476,7 +479,17 @@ const decryptExportPayload = async (payload: any, password: string) => {
 
   const salt = decodeBase64(payload.kdf?.salt ?? '');
   const iv = decodeBase64(payload.cipher?.iv ?? '');
-  const iterations = Number(payload.kdf?.iterations ?? ENCRYPTION_ITERATIONS);
+  const parsedIterations = payload.kdf?.iterations ?? ENCRYPTION_ITERATIONS;
+  const iterations = typeof parsedIterations === 'number'
+    ? parsedIterations
+    : Number(parsedIterations);
+  if (
+    !Number.isSafeInteger(iterations)
+    || iterations < MIN_ENCRYPTION_ITERATIONS
+    || iterations > MAX_ENCRYPTION_ITERATIONS
+  ) {
+    throw new Error('Unsupported encryption iterations.');
+  }
   const key = await deriveEncryptionKey(password, salt, iterations);
   const ciphertext = decodeBase64(payload.ciphertext ?? '');
   const plaintextBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
@@ -520,6 +533,12 @@ const normalizeKnownDiseases = (value: unknown): KnownDiseaseEntry[] => {
   return [];
 };
 
+const isSafeRecordKey = (value: unknown): value is string => (
+  typeof value === 'string'
+  && value.length > 0
+  && !RESERVED_OBJECT_KEYS.has(value)
+);
+
 const createEmptyPerson = (): Person => ({
   id: createId(),
   firstName: '',
@@ -554,10 +573,34 @@ const createUnion = (partnerIds: string[], status: UnionStatus = 'active'): Unio
 });
 
 const normalizeTree = (tree: any): FamilyTree => {
-  const persons: Record<string, Person> = {};
-  const unions: Record<string, Union> = tree.unions && typeof tree.unions === 'object' ? tree.unions : {};
+  const persons: Record<string, Person> = Object.create(null) as Record<string, Person>;
+  const unions: Record<string, Union> = Object.create(null) as Record<string, Union>;
+
+  if (tree.unions && typeof tree.unions === 'object') {
+    Object.values(tree.unions).forEach((union: any) => {
+      if (!union || typeof union !== 'object') return;
+      if (!isSafeRecordKey(union.id)) return;
+
+      const partnerIds = Array.isArray(union.partnerIds)
+        ? union.partnerIds.filter(isSafeRecordKey)
+        : [];
+      const childIds = Array.isArray(union.childIds)
+        ? union.childIds.filter(isSafeRecordKey)
+        : [];
+
+      unions[union.id] = {
+        id: union.id,
+        partnerIds: Array.from(new Set(partnerIds)),
+        status: union.status === 'divorced' ? 'divorced' : 'active',
+        childIds: Array.from(new Set(childIds)),
+      };
+    });
+  }
 
   Object.values(tree.persons || {}).forEach((person: any) => {
+    if (!person || typeof person !== 'object') return;
+    if (!isSafeRecordKey(person.id)) return;
+
     const normalizedLastNames: string[] = Array.isArray(person.lastNames)
       ? person.lastNames.map((name: unknown) => normalizeInlineText(name))
       : person.lastName
@@ -577,7 +620,7 @@ const normalizeTree = (tree: any): FamilyTree => {
       knownDiseases: normalizeKnownDiseases(person.knownDiseases),
       notes: normalizeRichTextForStorage(normalizeMultilineText(person.notes ?? '')),
       photo: person.photo,
-      parentUnionId: person.parentUnionId ?? null,
+      parentUnionId: isSafeRecordKey(person.parentUnionId) ? person.parentUnionId : null,
       unionIds: [],
       position: person.position, // Preserve saved position
     };
@@ -601,6 +644,17 @@ const normalizeTree = (tree: any): FamilyTree => {
     unions,
     rootPersonId,
   };
+};
+
+const clearSharedImportCache = async () => {
+  if (typeof caches === 'undefined') return;
+  const cacheNames = await caches.keys();
+  await Promise.all(
+    cacheNames.map(async (cacheName) => {
+      const cache = await caches.open(cacheName);
+      await cache.delete(SHARED_IMPORT_CACHE_PATH);
+    })
+  );
 };
 
 export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
@@ -1594,6 +1648,11 @@ export const FamilyTreeProvider = ({ children }: { children: ReactNode }) => {
       } catch (error) {
         alert(copy.importError);
       } finally {
+        try {
+          await clearSharedImportCache();
+        } catch {
+          // Ignore cache cleanup errors.
+        }
         currentUrl.searchParams.delete(SHARED_IMPORT_QUERY_KEY);
         const nextUrl = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
