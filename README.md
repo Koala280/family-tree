@@ -20,7 +20,7 @@
   <a href="https://github.com/Koala280/family-tree/actions/workflows/ci.yml">
     <img src="https://github.com/Koala280/family-tree/actions/workflows/ci.yml/badge.svg" alt="CI status">
   </a>
-  <img src="https://img.shields.io/github/license/Koala280/family-tree" alt="MIT license">
+  <img src="https://img.shields.io/github/license/Koala280/family-tree?cacheSeconds=300" alt="MIT license">
 </p>
 
 ## Why This Project
