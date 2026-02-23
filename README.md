@@ -21,9 +21,6 @@
     <img src="https://github.com/Koala280/family-tree/actions/workflows/ci.yml/badge.svg" alt="CI status">
   </a>
   <img src="https://img.shields.io/github/license/Koala280/family-tree" alt="MIT license">
-  <img src="https://img.shields.io/badge/PWA-ready-0A7A3D" alt="PWA ready">
-  <img src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" alt="React 19">
-  <img src="https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white" alt="TypeScript 5.6">
 </p>
 
 ## Why This Project
