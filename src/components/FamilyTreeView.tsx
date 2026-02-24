@@ -2021,9 +2021,56 @@ export const FamilyTreeView = () => {
       }
       return allowedGens.has(el.generation);
     });
-    const filteredPersonIds = new Set<string>();
+
+    const visibleUnionIds = new Set<string>();
     nextFilteredElements.forEach(el => {
+      if (el.type === 'union-symbol') {
+        visibleUnionIds.add(el.id);
+      }
+    });
+
+    // Hide detached relatives (for example siblings whose parent generation is filtered out),
+    // unless they are explicitly standalone or the focused person.
+    const detachedPersonIds = new Set<string>();
+    nextFilteredElements.forEach(el => {
+      if (el.type !== 'person') return;
+
+      const personId = el.id;
+      if (personId === focusedPersonId) return;
+      if (standalonePersonIds.has(personId)) return;
+
+      const person = familyTree.persons[personId];
+      if (!person) return;
+
+      const parentUnionId = canonicalParentUnionByPerson.get(personId);
+      const hasVisibleParentUnion = parentUnionId ? visibleUnionIds.has(parentUnionId) : false;
+      if (hasVisibleParentUnion) return;
+
+      const hasVisibleOwnUnion = person.unionIds.some(unionId => visibleUnionIds.has(unionId));
+      if (!hasVisibleOwnUnion) {
+        detachedPersonIds.add(personId);
+      }
+    });
+
+    const filteredElementsWithoutDetachedPersons = nextFilteredElements.filter(el => (
+      el.type !== 'person' || !detachedPersonIds.has(el.id)
+    ));
+
+    const filteredPersonIds = new Set<string>();
+    filteredElementsWithoutDetachedPersons.forEach(el => {
       if (el.type === 'person') filteredPersonIds.add(el.id);
+    });
+
+    const nextFilteredElementsWithConnectedUnions = filteredElementsWithoutDetachedPersons.filter(el => {
+      if (el.type !== 'union-symbol') return true;
+      const union = familyTree.unions[el.id];
+      if (!union) return false;
+
+      const childIds = canonicalChildIdsByUnion.get(union.id) ?? [];
+      const hasVisiblePartner = union.partnerIds.some(partnerId => filteredPersonIds.has(partnerId));
+      const hasVisibleChild = childIds.some(childId => filteredPersonIds.has(childId));
+
+      return hasVisiblePartner || hasVisibleChild;
     });
 
     const generationFilteredUp = new Set<string>();
@@ -2069,7 +2116,7 @@ export const FamilyTreeView = () => {
     });
 
     return {
-      filteredElements: nextFilteredElements,
+      filteredElements: nextFilteredElementsWithConnectedUnions,
       generationFilteredUpPersons: generationFilteredUp,
       generationFilteredDownPersons: generationFilteredDown,
     };
@@ -3232,6 +3279,18 @@ export const FamilyTreeView = () => {
               draggedPosition,
               parentPosition,
               `drag-direct-parent-${draggedPersonId}-${parentId}-${parentUnion.id}`,
+              parentClassName
+            );
+          });
+
+          getRenderChildIds(parentUnion).forEach(siblingId => {
+            if (siblingId === draggedPersonId) return;
+            const siblingPosition = personPositions.get(siblingId);
+            if (!siblingPosition) return;
+            drawDirectPersonLine(
+              draggedPosition,
+              siblingPosition,
+              `drag-direct-sibling-${draggedPersonId}-${siblingId}-${parentUnion.id}`,
               parentClassName
             );
           });
